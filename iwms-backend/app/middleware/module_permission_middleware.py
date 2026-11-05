@@ -1,0 +1,1041 @@
+import copy
+import json
+import jwt
+import re
+
+from django.conf import settings
+from django.core.cache import cache
+from django.contrib.auth import get_user_model
+from django.http import JsonResponse, QueryDict
+from django.urls import Resolver404, resolve
+from django.utils.deprecation import MiddlewareMixin
+
+from app.models.superadmin.staff_management.staffcreation import Staffcreation
+from app.models.masters.customer_masters.customercreation import CustomerCreation
+from app.models.masters.leader_management.panchayat_leader_login import PanchayatLeaderLogin
+from app.models.masters.leader_management.district_leader_login import DistrictLeaderLogin
+from app.utils.permission_response import resolve_permission_payload
+from app.services.login_session import validate_session
+from app.authentication.cookies import request_token
+from app.utils.permission_catalog import PLATFORM_SUPERADMIN_ROUTES, ROUTE_OWNERS
+from app.utils.screen_dependencies import INCLUDED_BY, LOOKUP_FOR
+
+
+# ============================================================
+# HTTP → ACTION MAP
+# ============================================================
+
+HTTP_ACTION_MAP = {
+    "POST": "add",
+    "GET": "view",
+    "HEAD": "view",
+    "PUT": "edit",
+    "PATCH": "edit",
+    "DELETE": "delete",
+}
+
+# Actions that only read data: allowed on read-only (dropdown) resources.
+READ_ACTIONS = frozenset({"view", "export"})
+
+
+# ============================================================
+# API PATH CONFIG
+# ============================================================
+
+API_AUTH_PREFIXES = (
+    "/api/mobile/",
+    "/api/desktop/",
+    "/api/v1/",
+)
+
+AUTH_ONLY_SUFFIXES = (
+    "main-category/",
+    "sub-category/",
+    "register/",
+    "recognize/",
+    # NOT "face-config/" — that endpoint is nested (`attendance/face-config/`)
+    # like register-fcm-token/ is, so a bare-concatenation entry here would
+    # never actually match it. It has its own dedicated `endswith` bypass
+    # right next to register-fcm-token/'s below; adding a dead entry here too
+    # would just be a second, misleading place to look for the real gate.
+    "employee/",
+    "staff-profile/",
+    "waste/",
+    "attendance-list/",
+    "localbody/",        # panchayat leader portal — auth only, no module permission check
+    "district/",         # district portal — auth only, no module permission check
+    "register-fcm-token/",  # staff + citizen FCM device token self-registration
+    "login/my-permissions/",
+    "login/me/",        # web session restore after a page reload
+)
+
+# Citizen-scoped grievance API — self-service, no module-permission check;
+# every query inside the viewset is hard-scoped to the logged-in citizen.
+CITIZEN_PREFIXES = tuple(
+    prefix + "citizen/"
+    for prefix in API_AUTH_PREFIXES
+)
+
+AUTH_ONLY_PREFIXES = tuple(
+    prefix + suffix
+    for prefix in API_AUTH_PREFIXES
+    for suffix in AUTH_ONLY_SUFFIXES
+)
+
+PLATFORM_PREFIXES = (
+    "/api/platform/",
+    # Company workspace API (/api/t/<slug>/ws/...): its views authenticate
+    # the company login and check per-project module permissions themselves.
+    "/api/v1/ws/",
+)
+
+PUBLIC_PREFIXES = (
+    "/media/",
+)
+
+# POST {"path": "/masters/fuels/", ...} -> an Excel file of that list. Needs
+# "export" on the resource the body's `path` resolves to.
+EXPORT_EXCEL_PATHS = frozenset(
+    prefix + "exports/excel/"
+    for prefix in API_AUTH_PREFIXES
+) | frozenset(
+    prefix + "exports/excel"
+    for prefix in API_AUTH_PREFIXES
+)
+
+COMMON_AUDIT_CREATE_PATHS = tuple(
+    prefix + "audits/common-audit/"
+    for prefix in API_AUTH_PREFIXES
+)
+
+
+# ============================================================
+# MODULE → RESOURCE ALLOWLIST
+# (THIS MUST MATCH ViewSet.permission_resource)
+#
+# Routes a screen owns in app/utils/permission_catalog.py are allowed
+# without being listed here. This list is still needed for routes reached only
+# through SCREEN_DEPENDENCIES (child APIs, dropdown lookups) and for the
+# read-only restrictions below. New screens go in the catalog first.
+# ============================================================
+
+MODULE_RESOURCE_ALLOWLIST = {
+    "common-masters": {
+        "Continent",
+        "Country",
+        "State",
+    },
+    "masters": {
+        "District",
+        "City",
+        "Zone",
+        "Ward",
+        "Panchayat",
+        "Plant",
+        # Department/Designation moved to the "staff-creations" module.
+        "PanchayatLeaderLogin",
+        "DistrictLeaderLogin",
+    },
+    "waste-types": {
+        "Property",
+        "SubProperty",
+        "Bin",
+        "CollectionPoint",
+        "WasteType",
+    },
+    "screen-managements": {
+        "MainScreenType",
+        "MainScreen",
+        "UserScreen",
+        "UserScreenAction",
+        "CompanyUserScreenPermission",
+        "companywisescreenpermissions",
+        "column-permissions",
+        "AppModule",
+    },
+    "role-assigns": {
+        "UserType",
+        "StaffUserType",
+        "ContractorUserType",
+        # Has its own sidebar page, but was never allowlisted, so every
+        # non-superuser request 403'd as "Resource not allowed".
+        "ProjectStaffHierarchy",
+    },
+    "staff-creations": {
+        "StaffCreation",
+        "staffaccessconfiguration",
+        # Moved here from the "masters" group along with their router
+        # registrations (see base_urls.py).
+        "Department",
+        "Designation",
+    },
+    "customer-masters": {
+        "CustomerCreation",
+        "CustomerAccessConfiguration",
+    },
+    # Global complaint configuration, superadmin-only. These masters carry no
+    # company/project FK, so one edit here changes behaviour for every tenant
+    # — which is exactly why they live behind their own module key instead of
+    # inside "complaint-ticket" with the per-company entry screens.
+    "complaint-masters": {
+        "ComplaintModule",
+        "ComplaintPriority",
+        "ComplaintStatus",
+        "ComplaintSource",
+        "ComplaintLanguage",
+        "ComplaintCategory",
+        "ComplaintSubcategory",
+        "ComplaintSlaRule",
+        "ComplaintRoutingRule",
+    },
+    # Company/project-scoped complaint entries + the teams that work them.
+    "complaint-ticket": {
+        # renamed from the legacy "grivences" module
+        "Complaint",
+        "MainCategory",
+        "SubCategory",
+        # ticketed complaint workflow (app.models.core_modules.complaint_management)
+        "ComplaintFeedback",
+        "ComplaintReopenHistory",
+        "ComplaintNotification",
+        "ComplaintAddressChange",
+        "ComplaintTicket",
+        # Read-only master access: the Complaint Desk's Type/Sub-type/Priority
+        # dropdowns are served from the "complaint-masters" tables, so staff
+        # who only hold "complaint-ticket" still need GET on them. Writes are
+        # blocked by MASTER_READONLY_RESOURCES below, not by this allowlist.
+        "ComplaintCategory",
+        "ComplaintSubcategory",
+        "ComplaintPriority",
+        "ComplaintStatus",
+        "ComplaintSource",
+        "ComplaintLanguage",
+        "ComplaintModule",
+        "ComplaintSlaRule",
+    },
+    "transport-masters": {
+        "VehicleTypeCreation",
+        "VehicleCreation",
+        "Fuel",
+    },
+    "schedule-setup": {
+        # split from the legacy "schedule-masters" module — setup resources
+        "StaffTemplateCreation",
+        "AlternativeStaffTemplate",
+        "CollectionPoint",
+        "TripPlan",
+    },
+    "schedule-operations": {
+        # split from the legacy "schedule-masters" module — operational resources
+        "DailyTripAssignment",
+        "DailyTripCollectionPoint",
+        "DailyTripHouseholdCollection",
+        "BinCollectionEvent",
+        "DailyTripLog",
+        "WasteCollection",
+        "VehicleBreakdown",
+        "TripDelayReport",
+        "TripRetripRequest",
+        "StaffNotification",
+        # No screen of its own: granted through the static route map (writes)
+        # and Daily Trip Tracking (reads) — see app/utils/screen_dependencies.py.
+        "RouteDetourWaypoint",
+        # Same: saved from the static route map ("Save Route").
+        "TripPlanStaticRoute",
+    },
+    "operator-mobile": {
+        # Driver/operator app endpoints. These are mobile-shaped URLs, but
+        # they mutate/read the same operational resources governed by the web
+        # Staff Access Configuration checkboxes.
+        "DailyTripAssignment",
+        "DailyTripCollectionPoint",
+        "DailyTripHouseholdCollection",
+        "BinCollectionEvent",
+    },
+    "attendance": {
+        # Attendance routes are mobile-facing, but they must still be granted
+        # from Staff Access Configuration like every other app screen.
+        "AttendanceList",
+        "StaffProfile",
+        "Register",
+        "Recognize",
+        "AttendanceRecords",
+        # NOT "FaceConfig" — that endpoint bypasses this whole check (see the
+        # `attendance/face-config/` block above, next to register-fcm-token).
+        # It has no UserScreen catalog row, so listing it here would look
+        # like it does something when it cannot: `allowed_actions` for an
+        # un-seeded resource is always empty, so every request would still
+        # 403 regardless of this set.
+    },
+    # No "schedule-masters" entry: that URL group no longer registers any
+    # routes. Its setup/operations resources live under "schedule-setup" /
+    # "schedule-operations" and its reports under "reports"; grants still
+    # stored under the old module name resolve via RESOURCE_MODULE_FALLBACKS.
+    "reports": {
+        "DailyWasteComparison",
+        "MonthlyWasteComparisonReport",
+        "ComplaintsReport",
+    },
+    # Admin Dashboard is granted by the dashboard/admin-dashboard screen. The
+    # dashboard/superadmin-dashboard screen is superadmin-only: its route is
+    # in PLATFORM_SUPERADMIN_ROUTES, refused before any grant is read.
+    "dashboards": {
+        "AdminDashboard",
+        "SuperadminDashboard",
+        "VehicleStatusDashboard",
+    },
+    # The user dashboard's summary, granted by the user-dashboard/home-dashboard
+    # screen.
+    "dashboard": {
+        "DashboardSummary",
+    },
+    "audits": {
+        "StaffTemplateAuditLog",
+        "LoginAudit",
+        "CommonAudit",
+        "PermissionAudit",
+        "StaticRouteAudit",
+        "ComplaintAudit",
+        "DbChangeAudit",
+        "AuditDashboard",
+    },
+}
+
+# alias safety
+MODULE_RESOURCE_ALLOWLIST["grivences"] = MODULE_RESOURCE_ALLOWLIST["complaint-ticket"]
+MODULE_RESOURCE_ALLOWLIST["grievance"] = MODULE_RESOURCE_ALLOWLIST["complaint-ticket"]
+
+# Resources reachable through a module purely so its screens can populate
+# dropdowns. Only "view" is ever granted here; every write must go through the
+# module that actually owns the resource. Keyed by module -> resource names.
+#
+# The complaint masters are global (no company/project FK), so letting a
+# company-scoped role write them would silently reconfigure every other
+# tenant. The Complaint Desk still needs to *read* them for its Type/Sub-type
+# pickers, hence read-only rather than removing them from the allowlist.
+MODULE_READONLY_RESOURCES = {
+    "complaint-ticket": {
+        "ComplaintCategory",
+        "ComplaintSubcategory",
+        "ComplaintPriority",
+        "ComplaintStatus",
+        "ComplaintSource",
+        "ComplaintLanguage",
+        "ComplaintModule",
+        "ComplaintSlaRule",
+    },
+}
+MODULE_READONLY_RESOURCES["grivences"] = MODULE_READONLY_RESOURCES["complaint-ticket"]
+MODULE_READONLY_RESOURCES["grievance"] = MODULE_READONLY_RESOURCES["complaint-ticket"]
+
+PROTECTED_MODULES = tuple(MODULE_RESOURCE_ALLOWLIST.keys())
+
+# "module/route" pairs only a platform super admin (superuser with no
+# company) may call: the routes of the catalog's `superadmin_only` screens
+# (PLATFORM_SUPERADMIN_ROUTES). Checked before the superuser bypass, so a
+# superuser tied to a company is refused too, and no screen grant opens them.
+
+
+def _is_platform_super_admin(user):
+    return bool(
+        getattr(user, "is_superuser", False)
+        and getattr(user, "company_id", None) is None
+    )
+
+MODULE_PERMISSION_ALIASES = {
+    "customer-masters": "customers",
+    "process-items": "process",
+    "grievance": "grivences",
+    # Mobile driver/operator URLs are not a separate permission namespace.
+    # They are authorized by the matching Daily Operations screen grants.
+    "operator-mobile": "schedule-operations",
+    # "complaint-ticket" is the live URL module (see base_urls.py); permission
+    # rows already seeded/granted under the old "grivences" module name keep
+    # authorizing it without needing to be re-granted.
+    "complaint-ticket": "grivences",
+}
+
+# "schedule-setup"/"schedule-operations" are a pure split of the legacy
+# "schedule-masters" module, and Bin/WasteType route under "waste-types" but
+# were split out of the legacy "assets" module — in both cases the target
+# module also has resources genuinely seeded there natively (e.g. TripPlan
+# under schedule-setup, Property under waste-types), so a blanket
+# MODULE_PERMISSION_ALIASES entry would shadow those. Instead, each listed
+# resource's action lookup additionally falls back to the named legacy
+# module only when the primary (current) module has no entry for it — see
+# _resolve_allowed_actions below.
+RESOURCE_MODULE_FALLBACKS = {
+    "Bin": "assets",
+    "WasteType": "assets",
+    "StaffTemplateCreation": "schedule-masters",
+    "AlternativeStaffTemplate": "schedule-masters",
+    "CollectionPoint": "schedule-masters",
+    "TripPlan": "schedule-masters",
+    "DailyTripAssignment": "schedule-masters",
+    "DailyTripCollectionPoint": "schedule-masters",
+    "DailyTripHouseholdCollection": "schedule-masters",
+    "BinCollectionEvent": "schedule-masters",
+    "AttendanceList": "attendance",
+    "StaffProfile": "attendance",
+    "Register": "attendance",
+    "Recognize": "attendance",
+    "AttendanceRecords": "attendance",
+    "DailyTripLog": "schedule-masters",
+    "WasteCollection": "schedule-masters",
+    "VehicleBreakdown": "schedule-masters",
+    "TripDelayReport": "schedule-masters",
+    "TripRetripRequest": "schedule-masters",
+    # Reports were registered under "schedule-masters" until they moved to
+    # the "reports" group; covers grants made before the permission seeder
+    # re-homes their screens.
+    "DailyWasteComparison": "schedule-masters",
+    "MonthlyWasteComparisonReport": "schedule-masters",
+}
+
+# Pre-split module names a screen's grants may still be stored under, used when
+# resolving the owner of a SCREEN_DEPENDENCIES entry.
+LEGACY_OWNER_MODULES = {
+    "schedule-setup": "schedule-masters",
+    "schedule-operations": "schedule-masters",
+    "waste-types": "assets",
+}
+
+RESOURCE_PERMISSION_ALIASES = {
+    "Bin": ("bins",),
+    "Department": ("departments", "department-masters"),
+    "Designation": ("designations", "designation-masters"),
+    # Reverse direction: the router exposes these as /departments/ and
+    # /designations/, but the permission rows are seeded under the screen
+    # names, so the URL resource has to resolve to them too.
+    "departments": ("department-masters", "Department"),
+    "designations": ("designation-masters", "Designation"),
+    "StaffTemplateCreation": ("StaffTemplate", "staff-templates"),
+    "VehicleTypeCreation": ("vehicle-type", "vehicle-types"),
+    "companywisescreenpermissions": ("CompanyUserScreenPermission",),
+    "column-permissions": ("CompanyUserScreenPermission",),
+    "staffaccessconfiguration": ("staff-access-configuration",),
+    "AppModule": ("app-modules",),
+    "CustomerAccessConfiguration": ("customer-access-configuration",),
+    "DailyTripAssignment": ("daily-trip-assignments",),
+    "DailyTripCollectionPoint": ("daily-trip-collection-points",),
+    "DailyTripHouseholdCollection": ("daily-trip-household-collections",),
+    "BinCollectionEvent": ("bin-collection-events",),
+    "AttendanceList": ("attendance", "daily-attendance"),
+    "StaffProfile": ("attendance", "staff-profile"),
+    "Register": ("attendance", "register"),
+    "Recognize": ("attendance", "recognize"),
+    "AttendanceRecords": ("attendance", "records"),
+    # `grievance-tickets` is an alias route onto the same ComplaintTicketViewSet
+    # as `tickets` (see base_urls.py), and the mobile app calls the alias. Only
+    # one screen is seeded — "tickets" — so without this pairing no ticket
+    # checkbox an admin can tick ever authorizes the app's grievance screen.
+    "ComplaintTicket": ("tickets", "grievance-tickets"),
+    "grievance-tickets": ("tickets", "ComplaintTicket"),
+}
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def _split_path(path):
+    return [p for p in path.split("?")[0].split("/") if p]
+
+
+def _module_from_path(path):
+    parts = _split_path(path)
+    for part in parts:
+        if part == "api":
+            continue
+        if part.startswith("v") and part[1:].isdigit():
+            continue
+        if part in PROTECTED_MODULES:
+            return part
+    return None
+
+
+def _route_resource_from_path(path, module):
+    parts = _split_path(path)
+    try:
+        module_index = parts.index(module)
+    except ValueError:
+        return None
+
+    if module_index + 1 >= len(parts):
+        return None
+
+    resource = parts[module_index + 1]
+    # Skip an API version segment ("v1"), not every route starting with "v"
+    # (vehicle-creation, vehicle-type, ...).
+    if resource and not re.fullmatch(r"v\d+", resource):
+        return resource
+    return None
+
+
+def _permission_resource_for_request(view_class, request, default_resource):
+    """Call a viewset's optional `permission_resource_for_request` hook.
+
+    `request` here is the raw Django `WSGIRequest` passed into
+    `process_view` — DRF hasn't wrapped it into its own `Request` yet (that
+    only exists inside the view, e.g. the `list()`/`create()` method this
+    same viewset defines). A hook that reads query params MUST use
+    `request.GET`, not `request.query_params` — that attribute doesn't
+    exist yet at this point and raises `AttributeError`, which surfaces as a
+    500 on every request to that endpoint (see trip_stops_viewset.py's
+    `permission_resource_for_request` for the fix once this bit).
+    """
+    resolver = getattr(view_class, "permission_resource_for_request", None)
+    if callable(resolver):
+        return resolver(request, default_resource)
+    return default_resource
+
+
+def _permission_action_for_request(view_class, request, default_action):
+    """Same `request.GET`-not-`.query_params` contract as
+    `_permission_resource_for_request` above."""
+    resolver = getattr(view_class, "permission_action_for_request", None)
+    if callable(resolver):
+        return resolver(request, default_action)
+    return default_action
+
+
+def _resource_allowlist_candidates(permission_resource, route_resource=None):
+    return {
+        candidate
+        for candidate in (
+            permission_resource,
+            route_resource,
+            *RESOURCE_PERMISSION_ALIASES.get(permission_resource, ()),
+        )
+        if candidate
+    }
+
+
+def _authenticate_request(request):
+    token = request_token(request)
+    if not token:
+        return JsonResponse({"detail": "Authorization token missing"}, status=401)
+
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return JsonResponse({"detail": "Token expired"}, status=401)
+    except jwt.InvalidTokenError:
+        return JsonResponse({"detail": "Invalid token"}, status=401)
+
+    session_error = validate_session(payload)
+    if session_error:
+        return JsonResponse(
+            {"detail": session_error, "code": "session_ended"}, status=401
+        )
+
+    unique_id = payload.get("unique_id")
+    if not unique_id:
+        return JsonResponse({"detail": "Invalid token payload"}, status=401)
+
+    from app.tenancy.context import company_tables_reachable, is_platform_payload
+
+    platform_only = is_platform_payload(payload) or not company_tables_reachable()
+
+    # Staff
+    staff = None if platform_only else Staffcreation.objects.filter(staff_unique_id=unique_id).first()
+    if staff:
+        request.user = staff
+        request.jwt_payload = payload
+        return None
+
+    # Customer
+    customer = None if platform_only else CustomerCreation.objects.filter(unique_id=unique_id).first()
+    if customer:
+        request.user = customer
+        request.jwt_payload = payload
+        return None
+
+    # Panchayat leader (localbody portal)
+    leader = None if platform_only else PanchayatLeaderLogin.objects.filter(
+        unique_id=unique_id
+    ).first()
+    if leader:
+        request.user = leader
+        request.jwt_payload = payload
+        return None
+
+    # District leader (district portal)
+    district_leader = None if platform_only else DistrictLeaderLogin.objects.filter(
+        unique_id=unique_id
+    ).first()
+    if district_leader:
+        request.user = district_leader
+        request.jwt_payload = payload
+        return None
+
+    # Platform user
+    UserModel = get_user_model()
+    user = UserModel.objects.filter(unique_id=unique_id).first()
+    if not user:
+        user_id = payload.get("user_id")
+        if user_id:
+            user = UserModel.objects.filter(pk=user_id).first()
+
+    if user:
+        request.user = user
+        request.jwt_payload = payload
+        return None
+
+    return JsonResponse({"detail": "User not found"}, status=401)
+
+
+def _permission_filters_for_user(user):
+    company = getattr(user, "company", None)
+    company_unique_id = getattr(company, "unique_id", None)
+    staff_unique_id = getattr(user, "staff_unique_id", None)
+
+    if not company_unique_id or not staff_unique_id:
+        return None
+
+    # `permissions` — the only part of the payload this middleware reads —
+    # comes purely from the staff member's own StaffAccessConfiguration rows
+    # (see `permission_querysets`, which ignores everything else). There is no
+    # role baseline underneath any more, so role_name is passed only to keep
+    # this call shaped like the login one, and `app_module` is deliberately
+    # NOT passed: it is now a property that queries the access configuration,
+    # which would cost an extra query on every authenticated request to
+    # produce a value the resolver does not consult here.
+    role_obj = (
+        getattr(user, "staffusertype", None)
+        or getattr(user, "contractorusertype", None)
+    )
+
+    return {
+        "company_unique_id": company_unique_id,
+        "staff_unique_id": staff_unique_id,
+        "role_name": getattr(role_obj, "name", None),
+    }
+
+
+def _resolve_permissions_for_request(request):
+    filters = _permission_filters_for_user(request.user)
+    if not filters:
+        return {}
+
+    cache_key = (
+        "module-permissions:"
+        f"{filters['staff_unique_id']}:"
+        f"{filters['company_unique_id']}:"
+        f"{filters.get('role_name') or '-'}"
+    )
+
+    permissions = cache.get(cache_key)
+    if permissions is None:
+        permissions = resolve_permission_payload(**filters)["permissions"]
+        cache.set(cache_key, permissions, 60)
+
+    return permissions
+
+
+# ============================================================
+# MIDDLEWARE
+# ============================================================
+
+class ModulePermissionMiddleware(MiddlewareMixin):
+
+    def process_view(self, request, view_func, view_args, view_kwargs):
+
+        if request.method == "OPTIONS":
+            return None
+
+        if any(request.path.startswith(p) for p in PUBLIC_PREFIXES):
+            return None
+
+        if any(request.path.startswith(p) for p in PLATFORM_PREFIXES):
+            return None
+
+        if (
+            request.method == "POST"
+            and f"{request.path.rstrip('/')}/" in COMMON_AUDIT_CREATE_PATHS
+        ):
+            auth_error = _authenticate_request(request)
+            return auth_error
+
+        if any(request.path.startswith(p) for p in AUTH_ONLY_PREFIXES):
+            auth_error = _authenticate_request(request)
+            return auth_error
+
+        # FCM device-token self-registration — ANY authenticated staff or
+        # citizen may register their OWN token; this must never be gated by
+        # role/module permissions (a driver with no explicit
+        # StaffAccessConfiguration, for instance, would otherwise never be
+        # able to receive a push at all). `register-fcm-token/` is ALSO
+        # listed in AUTH_ONLY_SUFFIXES above, but that list is only ever
+        # checked via `startswith(prefix + suffix)` — a literal concatenation
+        # that can only match a SHALLOW route like `/api/v1/register-fcm-token/`.
+        # The real endpoints are nested under each viewset's own path
+        # (`.../staffcreation/register-fcm-token/`,
+        # `.../customercreations/register-fcm-token/`), which never starts
+        # with that literal string, so the listing there was never actually
+        # effective for this action — every register-fcm-token call was
+        # silently 403'ing for every role including citizen, which is why no
+        # push notification has ever been delivered. Matched by `endswith`
+        # here instead, deliberately independent of AUTH_ONLY_SUFFIXES so
+        # this fix cannot change the (working, startswith-based) semantics of
+        # any of that list's other entries.
+        if request.path.endswith("register-fcm-token/"):
+            auth_error = _authenticate_request(request)
+            return auth_error
+
+        # Attendance face-config — which face engine is active and its
+        # capture rules. Carries nothing about any individual, and is server
+        # config metadata every authenticated staff member needs just to use
+        # attendance at all, regardless of role. Putting it behind the
+        # granular per-role permission catalog (as first tried) meant it
+        # could NEVER be granted at all: that catalog only recognises
+        # UserScreen rows that a seeder creates and an admin ticks in Staff
+        # Access Configuration, and no such row exists (there is nothing to
+        # tick — this isn't a business screen), so `allowed_actions` was
+        # permanently empty and every request 403'd regardless of what the
+        # staff member's role held. Bypassed the same way
+        # `register-fcm-token/` above is, for the same reason: some
+        # endpoints are "may I use this app" plumbing, not a screen to grant.
+        if request.path.endswith("attendance/face-config/"):
+            auth_error = _authenticate_request(request)
+            return auth_error
+
+        if any(request.path.startswith(p) for p in CITIZEN_PREFIXES):
+            auth_error = _authenticate_request(request)
+            return auth_error
+
+        # Excel export of a list: the body's `path` names the list endpoint
+        # the export replays. Downloading it needs "export" on the resource
+        # that path resolves to (a plain GET of the list still needs "view").
+        if request.method == "POST" and request.path in EXPORT_EXCEL_PATHS:
+            auth_error = _authenticate_request(request)
+            if auth_error:
+                return auth_error
+            return self._authorize_export(request)
+
+        module = _module_from_path(request.path)
+        if not module:
+            return None
+
+        auth_error = _authenticate_request(request)
+        if auth_error:
+            return auth_error
+
+        return self._authorize(request, module, view_func)
+
+    def _authorize_export(self, request):
+        """Require "export" on the list endpoint an Excel export replays.
+
+        A `path` that does not resolve to a protected module/view is let
+        through: the export view replays it as a GET, which runs that
+        view's own checks.
+        """
+        if getattr(request.user, "is_superuser", False):
+            return None
+
+        try:
+            body = json.loads(request.body or b"{}")
+        except Exception:
+            # Unreadable/invalid body: the view rejects it itself.
+            return None
+        raw_path = body.get("path") if isinstance(body, dict) else None
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return None
+
+        target_path, _, query = raw_path.strip().partition("?")
+        if not target_path.startswith("/"):
+            target_path = "/" + target_path
+        if not target_path.startswith("/api/"):
+            target_path = "/api/v1" + target_path
+        if not target_path.endswith("/"):
+            target_path += "/"
+
+        module = _module_from_path(target_path)
+        if not module:
+            return None
+        try:
+            match = resolve(target_path)
+        except Resolver404:
+            return None
+
+        # Authorize as if this were the replayed GET, but asking for "export".
+        # The export's list filters travel in `params`; resource hooks read
+        # them from request.GET, as they would on the replayed GET.
+        query_dict = QueryDict(query, mutable=True)
+        params = body.get("params")
+        if isinstance(params, dict):
+            for key, value in params.items():
+                values = value if isinstance(value, (list, tuple)) else [value]
+                for item in values:
+                    if item is None or isinstance(item, (dict, list, tuple)):
+                        continue
+                    if isinstance(item, bool):
+                        item = str(item).lower()
+                    query_dict.appendlist(str(key), str(item))
+        target = copy.copy(request)
+        target.method = "GET"
+        target.path = target_path
+        target.path_info = target_path
+        target.GET = query_dict
+        return self._authorize(
+            target, module, match.func, required_actions=("export",)
+        )
+
+    def _authorize(self, request, module, view_func, required_actions=None):
+        """Check the authenticated `request.user` against the grant on the
+        resource `request.path` / `view_func` resolve to.
+
+        `required_actions` overrides the action derived from the HTTP
+        method; every one of them must be granted.
+        """
+        if (
+            f"{module}/{_route_resource_from_path(request.path, module)}" in PLATFORM_SUPERADMIN_ROUTES
+            and not _is_platform_super_admin(request.user)
+        ):
+            return JsonResponse(
+                {
+                    "detail": "Permission denied",
+                    "module": module,
+                    "reason": "Platform super admin only",
+                },
+                status=403,
+            )
+
+        if getattr(request.user, "is_superuser", False):
+            return None
+
+        view_class = getattr(view_func, "cls", None)
+        if not view_class:
+            return None
+
+        permission_resource = getattr(
+            view_class,
+            "permission_resource",
+            view_class.__name__.replace("ViewSet", "")
+        )
+        permission_resource = _permission_resource_for_request(
+            view_class,
+            request,
+            permission_resource,
+        )
+        route_resource = _route_resource_from_path(request.path, module)
+        # The screen the permission catalog says owns this route
+        # (app/utils/permission_catalog.py). It is the primary answer; the
+        # allowlist + name matching below only covers routes the catalog
+        # leaves to SCREEN_DEPENDENCIES, and per-request resource hooks.
+        route_owner = (
+            None
+            if callable(getattr(view_class, "permission_resource_for_request", None))
+            else ROUTE_OWNERS.get(f"{module}/{route_resource}")
+        )
+
+        allowed_resources = MODULE_RESOURCE_ALLOWLIST.get(module, set())
+        allowed_resource_keys = {
+            self._normalize_permission_key(resource)
+            for resource in allowed_resources
+        }
+        resource_candidates = _resource_allowlist_candidates(
+            permission_resource,
+            route_resource,
+        )
+        resource_allowed = route_owner is not None or any(
+            self._normalize_permission_key(candidate) in allowed_resource_keys
+            for candidate in resource_candidates
+        )
+
+        if not resource_allowed:
+            return JsonResponse(
+                {
+                    "detail": "Permission denied",
+                    "module": module,
+                    "resource": permission_resource,
+                    "route_resource": route_resource,
+                    "reason": "Resource not allowed",
+                },
+                status=403,
+            )
+
+        action = HTTP_ACTION_MAP.get(request.method)
+        if not action:
+            return JsonResponse({"detail": "Invalid HTTP method"}, status=405)
+        action = _permission_action_for_request(view_class, request, action)
+
+        if required_actions is None:
+            required_actions = [action]
+            # Bulk upload needs BOTH grants: "add" (writing records) and the
+            # dedicated "import" (uploading a file). Revoking either one
+            # blocks the upload.
+            if request.method == "POST" and request.path.rstrip("/").endswith(
+                "/bulk-upload"
+            ):
+                required_actions = ["import", "add"]
+        required_actions = list(required_actions)
+
+        # Dropdown-only resources: readable through this module, never writable.
+        readonly_resources = MODULE_READONLY_RESOURCES.get(module, set())
+        if (
+            any(a not in READ_ACTIONS for a in required_actions)
+            and readonly_resources
+        ):
+            readonly_keys = {
+                self._normalize_permission_key(resource)
+                for resource in readonly_resources
+            }
+            if any(
+                self._normalize_permission_key(candidate) in readonly_keys
+                for candidate in resource_candidates
+            ):
+                return JsonResponse(
+                    {
+                        "detail": "Permission denied",
+                        "module": module,
+                        "resource": permission_resource,
+                        "reason": (
+                            "Complaint masters are global configuration and are "
+                            "read-only here. Edit them under the "
+                            "'complaint-masters' module."
+                        ),
+                    },
+                    status=403,
+                )
+
+        permissions = _resolve_permissions_for_request(request)
+        request.resolved_permissions = permissions
+        allowed_actions = (
+            self._owner_actions(permissions, *route_owner) if route_owner else []
+        )
+
+        if not allowed_actions:
+            allowed_actions = self._resolve_allowed_actions(
+                permissions.get(module, {}),
+                permission_resource,
+                route_resource,
+            )
+
+        if not allowed_actions:
+            alias_module = MODULE_PERMISSION_ALIASES.get(module)
+            if alias_module:
+                allowed_actions = self._resolve_allowed_actions(
+                    permissions.get(alias_module, {}),
+                    permission_resource,
+                    route_resource,
+                )
+
+        if not allowed_actions:
+            fallback_module = RESOURCE_MODULE_FALLBACKS.get(permission_resource)
+            if fallback_module:
+                allowed_actions = self._resolve_allowed_actions(
+                    permissions.get(fallback_module, {}),
+                    permission_resource,
+                    route_resource,
+                )
+
+        for required in required_actions:
+            if required in allowed_actions:
+                continue
+            # The resource may belong to another screen's page — a child the
+            # page saves through, or a dropdown it fills. A grant on that
+            # owning screen covers it (app/utils/screen_dependencies.py).
+            dependency_actions = self._dependency_actions(
+                permissions, module, route_resource, required
+            )
+            if required in dependency_actions:
+                continue
+            # A GET is also satisfied by "use" — a lighter-weight grant meant
+            # for consuming a screen's records as reference data (e.g. a
+            # dropdown option source) without exposing the full list screen.
+            if required == "view" and (
+                "use" in allowed_actions or "use" in dependency_actions
+            ):
+                request.permission_use_only = True
+                continue
+
+            return JsonResponse(
+                {
+                    "detail": "Permission denied",
+                    "module": module,
+                    "resource": permission_resource,
+                    "action": required,
+                },
+                status=403,
+            )
+
+        return None
+
+    def _owner_actions(self, permissions, owner_module, owner_screen):
+        # Grants may still sit under a module's pre-rename name.
+        for module_name in (
+            owner_module,
+            MODULE_PERMISSION_ALIASES.get(owner_module),
+            LEGACY_OWNER_MODULES.get(owner_module),
+        ):
+            if not module_name:
+                continue
+            actions = self._resolve_allowed_actions(
+                permissions.get(module_name, {}), owner_screen
+            )
+            if actions:
+                return actions
+        return []
+
+    def _dependency_actions(self, permissions, module, route_resource, action):
+        """Actions a request earns from the screens that depend on its resource."""
+        if not route_resource:
+            return []
+        key = f"{module}/{route_resource}"
+
+        granted = set()
+        for owner_module, owner_screen in INCLUDED_BY.get(key, ()):
+            granted.update(
+                self._owner_actions(permissions, owner_module, owner_screen)
+            )
+
+        # Lookups are read-only: any real grant on the owner allows the read.
+        if action == "view":
+            for owner_module, owner_screen in LOOKUP_FOR.get(key, ()):
+                if self._owner_actions(permissions, owner_module, owner_screen):
+                    granted.add("use")
+                    break
+
+        return sorted(granted)
+
+    @staticmethod
+    def _normalize_permission_key(name):
+        if not name:
+            return ""
+        return re.sub(r"[\W_]+", "", name).lower()
+
+    def _resolve_allowed_actions(self, permissions_map, resource_name, route_resource=None):
+        if not permissions_map:
+            return []
+
+        resource_candidates = [
+            candidate
+            for candidate in (
+                route_resource,
+                resource_name,
+                *RESOURCE_PERMISSION_ALIASES.get(resource_name, ()),
+            )
+            if candidate
+        ]
+
+        for candidate in resource_candidates:
+            if candidate in permissions_map:
+                return permissions_map[candidate]
+
+        for candidate in resource_candidates:
+            target = self._normalize_permission_key(candidate)
+            for key, actions in permissions_map.items():
+                normalized = self._normalize_permission_key(key)
+                if normalized == target:
+                    return actions
+                if normalized.endswith("s") and normalized[:-1] == target:
+                    return actions
+                if target.endswith("s") and normalized == target[:-1]:
+                    return actions
+                if target.endswith("y") and normalized == target[:-1] + "ies":
+                    return actions
+                if normalized.endswith("y") and normalized[:-1] + "ies" == target:
+                    return actions
+
+        return []

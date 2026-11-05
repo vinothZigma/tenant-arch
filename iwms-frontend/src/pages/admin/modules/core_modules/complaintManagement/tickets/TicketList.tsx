@@ -1,0 +1,418 @@
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import Swal from "@/lib/notify";
+import { DataTable } from "@/components/common/SafeDataTable";
+import { Column } from "primereact/column";
+import { Button } from "primereact/button";
+import type {
+  DataTablePageEvent,
+  DataTableSortEvent,
+  SortOrder,
+} from "primereact/datatable";
+import { Eye } from "lucide-react";
+import { createCrudRoutePaths } from "@/utils/routePaths";
+import { getEncryptedRoute } from "@/utils/routeCache";
+import {
+  complaintFeedbackApi,
+  complaintTicketApi,
+} from "@/features/complaintTicketing/api";
+import type {
+  ComplaintFeedback,
+  ComplaintTicket,
+} from "@/features/complaintTicketing/types";
+import { asArray, errorText, formatDateTime } from "../utils";
+import { FilterBar } from "@/components/common/FilterBar";
+import { locationColumn } from "@/components/common/LocationColumn";
+import { StackCell } from "@/components/common/TableCells";
+import { ListPageHeader } from "@/components/common/ListPageHeader";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
+import { combineFilters } from "@/components/filters/useOptionFilter";
+import { useScreenAccess } from "@/contexts/screenPermission";
+
+const toRecordList = (value: unknown): ComplaintTicket[] => {
+  if (Array.isArray(value)) return value as ComplaintTicket[];
+  if (
+    value &&
+    typeof value === "object" &&
+    Array.isArray((value as { results?: unknown }).results)
+  ) {
+    return (value as { results: ComplaintTicket[] }).results;
+  }
+  return [];
+};
+
+// Backend `ordering_fields` also includes updated/next_escalation_due_at, but
+// only these two are rendered as columns whose field name matches a real
+// orderable backend column - keep sorting limited to what the server can honor.
+const SORTABLE_FIELDS = new Set(["ticket_no", "created"]);
+
+export default function TicketList() {
+  const navigate = useNavigate();
+  const { canAdd } = useScreenAccess();
+  const { encComplaintTicket, encComplaint } = getEncryptedRoute();
+  const { newPath, editPath } = createCrudRoutePaths(
+    encComplaintTicket,
+    encComplaint,
+  );
+  // Table view: one server-paginated page of raw ticket rows.
+  const [tableRows, setTableRows] = useState<ComplaintTicket[]>([]);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [first, setFirst] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [query, setQuery] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortField, setSortField] = useState<string | undefined>(undefined);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(undefined);
+
+  // Feedback used to be its own top-level screen; it's read-only and
+  // ticket-scoped (also viewable per-ticket via the Detail screen's Feedback
+  // tab), so it lives here now as a column + quick-filter instead.
+  const [feedbackByTicket, setFeedbackByTicket] = useState<
+    Map<string, ComplaintFeedback>
+  >(new Map());
+
+
+  useEffect(() => {
+    complaintFeedbackApi
+      .readAll({ params: { all: 1 } })
+      .then((response) => {
+        const rows = asArray<ComplaintFeedback>(response);
+        setFeedbackByTicket(
+          new Map(rows.map((row) => [String(row.ticket), row])),
+        );
+      })
+      .catch(() => setFeedbackByTicket(new Map()));
+  }, []);
+
+  // Tickets are company/project-scoped (`CompanyScopedViewSet`), so the list
+  // gets the same Company/Project pickers every scoped list uses — see
+  // `staffTemplateList.tsx`.
+  // Company / Project live in the table's Filters panel.
+  const companyProject = useCompanyProjectFilter(() => setFirst(0));
+  const companyUniqueId = companyProject.companyId;
+  const selectedProjectId = companyProject.projectId;
+
+  const buildTicketParams = () => ({
+    ...(companyUniqueId ? { company_id: companyUniqueId } : {}),
+    ...(selectedProjectId ? { project_id: selectedProjectId } : {}),
+  });
+
+  const ordering =
+    sortField && SORTABLE_FIELDS.has(sortField)
+      ? `${sortOrder === -1 ? "-" : ""}${sortField}`
+      : undefined;
+
+  const loadTableRows = async (
+    page: number,
+    limit: number,
+    search: string,
+    orderingParam?: string,
+  ) => {
+    setTableLoading(true);
+    try {
+      const response = await complaintTicketApi.readAllwithPaginated(
+        page,
+        limit,
+        {
+          params: {
+            ...buildTicketParams(),
+            ...(search ? { search } : {}),
+            ...(orderingParam ? { ordering: orderingParam } : {}),
+          },
+        },
+      );
+      setTableRows(toRecordList(response));
+      setTotalRecords(
+        typeof response?.count === "number"
+          ? response.count
+          : toRecordList(response).length,
+      );
+    } catch (err) {
+      Swal.fire("Error", errorText(err, "Unable to load tickets"), "error");
+    } finally {
+      setTableLoading(false);
+    }
+  };
+
+  // Reset to the first page whenever any filter other than pagination
+  // itself changes, so the user isn't left stranded on an out-of-range page.
+  useEffect(() => {
+    setFirst(0);
+  }, [
+    searchTerm,
+    ordering,
+    companyUniqueId,
+    selectedProjectId,
+  ]);
+
+  useEffect(() => {
+    void loadTableRows(
+      first / rowsPerPage + 1,
+      rowsPerPage,
+      searchTerm,
+      ordering,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    first,
+    rowsPerPage,
+    searchTerm,
+    ordering,
+    companyUniqueId,
+    selectedProjectId,
+  ]);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => setSearchTerm(query), 400);
+    return () => clearTimeout(timeout);
+  }, [query]);
+
+  const onPage = (event: DataTablePageEvent) => {
+    setFirst(event.first);
+    setRowsPerPage(event.rows);
+  };
+
+  const onSort = (event: DataTableSortEvent) => {
+    setFirst(0);
+    setSortField(event.sortField);
+    setSortOrder(event.sortOrder);
+  };
+
+  const feedbackTemplate = (row: ComplaintTicket) => {
+    const feedback = feedbackByTicket.get(String(row.unique_id));
+    if (!feedback) return <span className="text-xs text-slate-400">-</span>;
+    return (
+      <span
+        className="whitespace-nowrap rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700"
+        title={feedback.feedback_text ?? undefined}
+      >
+        {typeof feedback.rating === "number"
+          ? `★ ${feedback.rating}`
+          : "Feedback"}
+      </span>
+    );
+  };
+
+  const statusTemplate = (row: ComplaintTicket) => (
+    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
+      {row.status_name || row.status_code || "-"}
+    </span>
+  );
+
+  const slaTemplate = (row: ComplaintTicket) => {
+    if (
+      typeof row.sla_time_remaining_seconds === "number" &&
+      row.sla_time_remaining_seconds < 0
+    ) {
+      return (
+        <span className="whitespace-nowrap rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700">
+          Overdue
+        </span>
+      );
+    }
+    return (
+      <span className="whitespace-nowrap rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+        On Track
+      </span>
+    );
+  };
+
+  const contextTemplate = (row: ComplaintTicket) => {
+    const context = row.operational_context;
+    if (!context) return <span className="text-xs text-slate-400">Other</span>;
+    const references = [
+      context.trip_reference && `Trip: ${context.trip_reference}`,
+      context.vehicle_reference && `Vehicle: ${context.vehicle_reference}`,
+      context.driver_reference && `Driver: ${context.driver_reference}`,
+      context.operator_reference && `Operator: ${context.operator_reference}`,
+      context.other_reference,
+    ].filter(Boolean);
+    return (
+      <div className="min-w-0">
+        <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold capitalize text-indigo-700">
+          {context.incident_type || "other"}
+        </span>
+        {references.length > 0 && (
+          <p
+            className="mt-1 truncate text-xs text-slate-500"
+            title={references.join(" · ")}
+          >
+            {references.join(" · ")}
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  // "All data" is exported on the server with the active filters, since the
+  // table is lazily paginated and only holds one page.
+  const serverExport = (filename: string, sheetName: string) =>
+    complaintTicketApi.exportToExcel(
+      { params: buildTicketParams() },
+      filename,
+      sheetName,
+    );
+
+  return (
+    <div className="p-3">
+      <ListPageHeader
+        title="Complaint Tickets"
+        subtitle="Track submitted complaints and operational actions"
+        actions={
+          canAdd ? (
+            <Button
+              label="Add Ticket"
+              icon="pi pi-plus"
+              className="p-button-success"
+              onClick={() => navigate(newPath)}
+            />
+          ) : undefined
+        }
+        className="mb-4"
+      />
+
+      <DataTable
+        header={
+          <FilterBar
+            searchValue={query}
+            onSearchChange={(value) => setQuery(value)}
+            searchPlaceholder="Search tickets"
+          />
+        }
+        filterPanel={combineFilters(companyProject)}
+        onServerExport={serverExport}
+        value={tableRows}
+        dataKey="unique_id"
+        lazy
+        paginator
+        first={first}
+        rows={rowsPerPage}
+        totalRecords={totalRecords}
+        onPage={onPage}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        onSort={onSort}
+        rowsPerPageOptions={[5, 10, 25, 50]}
+        loading={tableLoading}
+        stripedRows
+        showGridlines
+        fitWidth
+        emptyMessage="No tickets found"
+        className="p-datatable-sm"
+      >
+        <Column
+          header="S.No"
+          body={(_, options) => options.rowIndex + 1}
+          style={{ width: "4%" }}
+        />
+        <Column
+          field="ticket_no"
+          header="Ticket"
+          sortable
+          style={{ width: "15%" }}
+          body={(row: ComplaintTicket) => (
+            <StackCell
+              primary={row.ticket_no}
+              lines={[
+                { icon: "pi-calendar", value: formatDateTime(row.created) },
+                row.source_code && (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                      row.source_code === "SYSTEM"
+                        ? "bg-indigo-100 text-indigo-800"
+                        : "bg-slate-100 text-slate-700"
+                    }`}
+                    title={row.source_code === "SYSTEM" ? "Raised automatically by the system" : undefined}
+                  >
+                    {row.source_code === "SYSTEM" ? "Automatic" : row.source_code.replace(/_/g, " ")}
+                  </span>
+                ),
+              ]}
+            />
+          )}
+        />
+        <Column
+          header="Customer"
+          style={{ width: "13%" }}
+          body={(row: ComplaintTicket) => (
+            <StackCell
+              primary={row.customer_name || row.profile_name}
+              lines={[{ icon: "pi-phone", value: row.wa_phone }]}
+            />
+          )}
+        />
+        <Column
+          header="Complaint"
+          style={{ width: "20%" }}
+          body={(row: ComplaintTicket) => (
+            <StackCell
+              primary={row.category_name}
+              lines={[
+                { label: "Subcategory", value: row.subcategory_name },
+                { label: "Waste Type", value: row.waste_type_name },
+                contextTemplate(row),
+              ]}
+            />
+          )}
+        />
+        {locationColumn<ComplaintTicket>({
+          header: "Location",
+          style: { width: "14%" },
+          levels: [
+            { label: "District", value: (row) => row.district_name },
+            { label: "Panchayat", value: (row) => row.panchayat_name },
+            { label: "Zone", value: (row) => row.zone_name },
+            { label: "Ward", value: (row) => row.ward_name },
+          ],
+        })}
+        <Column
+          header="Status"
+          style={{ width: "14%" }}
+          body={(row: ComplaintTicket) => (
+            <div className="flex flex-wrap items-center gap-1">
+              {statusTemplate(row)}
+              {slaTemplate(row)}
+              {feedbackByTicket.has(String(row.unique_id)) && feedbackTemplate(row)}
+              {row.priority_code && (
+                <span className="text-xs text-gray-600">
+                  <span className="text-gray-500">Priority:</span> {row.priority_code}
+                </span>
+              )}
+            </div>
+          )}
+        />
+        <Column
+          header="Assignment"
+          style={{ width: "13%" }}
+          body={(row: ComplaintTicket) => (
+            <StackCell
+              primary={row.assigned_staff_name}
+              lines={[
+                {
+                  label: "Next Escalation",
+                  value: row.next_escalation_due_at
+                    ? formatDateTime(row.next_escalation_due_at)
+                    : null,
+                },
+              ]}
+            />
+          )}
+        />
+        <Column
+          header="Actions"
+          body={(row) => (
+            <button
+              className="inline-flex text-blue-600"
+              onClick={() => navigate(editPath(row.unique_id))}
+              title="Open ticket"
+            >
+              <Eye className="h-5 w-5" />
+            </button>
+          )}
+          style={{ width: "7%" }}
+        />
+      </DataTable>
+    </div>
+  );
+}

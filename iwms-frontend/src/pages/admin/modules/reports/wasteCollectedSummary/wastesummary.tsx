@@ -1,0 +1,558 @@
+import type { ApiRow } from "./types";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import "./wastesummary.css";
+import { applyTableFilters } from "@/utils/tableFilterMatch";
+import { customerCreationApi, wasteCollectionApi } from "@/helpers/admin";
+
+import {
+  filterActiveCustomers,
+  normalizeCustomerArray,
+} from "@/utils/customerUtils";
+
+import { DataTable } from "@/components/common/SafeDataTable";
+import { StackCell } from "@/components/common/TableCells";
+import { Column } from "primereact/column";
+import { FilterMatchMode } from "primereact/api";
+import { useTranslation } from "react-i18next";
+import { useProjectSelector } from "@/contexts/ProjectSelectorContext";
+import { ProjectSelectorBar } from "@/components/common/ProjectSelectorBar";
+import { FilterBar } from "@/components/common/FilterBar";
+import { FilterSection, type ActiveFilterChip } from "@/components/common/ListToolbar";
+import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import { combineFilters, type FilterPart } from "@/components/filters/useOptionFilter";
+import { buildVehicleTrackingUrl } from "@/config/gpsApiConfig";
+
+import "primereact/resources/themes/lara-light-cyan/theme.css";
+import "primereact/resources/primereact.min.css";
+import "primeicons/primeicons.css";
+
+const WASTE_SUMMARY_GLOBAL_FIELDS = [
+  "date",
+  "total_trip",
+  "dry_weight",
+  "wet_weight",
+  "mix_weight",
+  "total_net_weight",
+];
+
+export default function WasteSummary() {
+  const { t, i18n } = useTranslation();
+  const {
+    weighmentApiUrl,
+    gpsVehicleTrackingApi,
+    gpsProviderName,
+    gpsFcode,
+    loading: contextLoading,
+  } = useProjectSelector();
+
+  const WEIGHMENT_API_URL = weighmentApiUrl;
+
+  const VEHICLE_TRACKING_API = buildVehicleTrackingUrl(
+    { providerName: gpsProviderName, fcode: gpsFcode },
+    gpsVehicleTrackingApi
+  );
+
+  const today = new Date();
+  const todayKey = today.toISOString().split("T")[0];
+  const initialMonth = `${today.getFullYear()}-${String(
+    today.getMonth() + 1
+  ).padStart(2, "0")}`;
+
+  // The month is required: the Filters panel edits a draft, Reset (and
+  // removing the chip) goes back to the current month.
+  const monthFilter = useDraftFilter({ empty: { month: initialMonth } });
+  const monthChips: ActiveFilterChip[] =
+    monthFilter.applied.month !== initialMonth
+      ? [
+          {
+            key: "month",
+            label: "Month",
+            value: monthFilter.applied.month,
+            onRemove: () => monthFilter.commit({ month: initialMonth }),
+          },
+        ]
+      : [];
+  const monthFilterPart: FilterPart = {
+    field: (
+      <FilterSection label="Month">
+        <input
+          type="month"
+          value={monthFilter.draft.month}
+          max={initialMonth}
+          onChange={(e) => monthFilter.setField("month", e.target.value)}
+          className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+          aria-label="Month"
+        />
+      </FilterSection>
+    ),
+    chips: monthChips,
+    count: monthChips.length,
+    // an emptied month input falls back to the current month
+    apply: () => monthFilter.commit({ month: monthFilter.draft.month || initialMonth }),
+    reset: () => monthFilter.commit({ month: initialMonth }),
+  };
+  const appliedMonth = monthFilter.applied.month;
+  const [rows, setRows] = useState<ApiRow[]>([]);
+  const [totalHouseholdCount, setTotalHouseholdCount] = useState<number | null>(
+    null
+  );
+  const [totalCollectedCount, setTotalCollectedCount] = useState<number | null>(
+    null
+  );
+  const [vehicleTrackingCount, setVehicleTrackingCount] = useState<
+    number | null
+  >(null);
+  const [collectedByDate, setCollectedByDate] = useState<
+    Record<string, number>
+  >({});
+
+  const [globalFilterValue, setGlobalFilterValue] = useState("");
+  const [filters, setFilters] = useState<any>({
+    global: { value: null, matchMode: FilterMatchMode.CONTAINS },
+  });
+
+  /* ================= HELPERS ================= */
+
+  const parseNum = (v?: number | string | null) => {
+    const n = Number(v);
+    return Number.isNaN(n) ? null : n;
+  };
+
+  const toDateKey = (value?: string | null) => {
+    if (!value) return "";
+    const raw = String(value).trim();
+    const isoMatch = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (isoMatch) return isoMatch[1];
+    const dmyMatch = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+    if (dmyMatch) {
+      const [, day, month, year] = dmyMatch;
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(
+        2,
+        "0"
+      )}`;
+    }
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString().split("T")[0];
+    }
+    return raw;
+  };
+
+  const formatNum = (v?: number | string | null) => {
+    const n = parseNum(v);
+    return n !== null ? n.toLocaleString() : "-";
+  };
+
+  const getCollectionDateValue = (entry: any) =>
+    entry?.collection_date ??
+    entry?.collectionDate ??
+    entry?.created_at ??
+    entry?.createdAt ??
+    entry?.date ??
+    entry?.created_date ??
+    entry?.createdDate;
+
+  const getVehicleCount = useCallback((row: ApiRow) => {
+    const values = [
+      row.total_vehicle,
+      row.vehicle_count,
+      row.total_vehicle_count,
+      row.vehicles,
+      row.no_of_vehicle,
+      row.no_of_vehicles,
+    ];
+    for (const v of values) {
+      const n = parseNum(v);
+      if (n !== null) return n;
+    }
+    return vehicleTrackingCount;
+  }, [vehicleTrackingCount]);
+
+  const getCollectedCount = (dateValue?: string | null) => {
+    const dateKey = toDateKey(dateValue ?? "");
+    if (dateKey && collectedByDate[dateKey] !== undefined) {
+      return collectedByDate[dateKey];
+    }
+    const rawKey = String(dateValue ?? "").trim();
+    if (rawKey && collectedByDate[rawKey] !== undefined) {
+      return collectedByDate[rawKey];
+    }
+    return 0;
+  };
+
+  const displayRows = useMemo(() => {
+    const map = new Map<string, ApiRow>();
+
+    rows.forEach((row) => {
+      const rawDate = String(row.date ?? "").trim();
+      const dateKey = toDateKey(rawDate) || rawDate;
+      if (!dateKey) return;
+      if (!map.has(dateKey)) {
+        map.set(dateKey, rawDate ? row : { ...row, date: dateKey });
+      }
+    });
+
+    Object.keys(collectedByDate).forEach((dateKey) => {
+      if (map.has(dateKey)) return;
+      map.set(dateKey, {
+        date: dateKey,
+        dry_weight: 0,
+        wet_weight: 0,
+        mix_weight: 0,
+        total_net_weight: 0,
+        average_weight_per_trip: 0,
+      });
+    });
+
+    return Array.from(map.values())
+      .filter((row) => {
+        const dateKey = toDateKey(row.date) || row.date;
+        if (!dateKey) return false;
+        return dateKey <= todayKey;
+      })
+      .sort((a, b) => {
+        const aKey = toDateKey(a.date) || a.date;
+        const bKey = toDateKey(b.date) || b.date;
+        if (aKey === bKey) return 0;
+        return aKey > bKey ? -1 : 1;
+      });
+  }, [rows, collectedByDate, todayKey]);
+
+  /* ================= FETCH MONTH DATA ================= */
+
+  const fetchMonthData = async (month: string) => {
+    try {
+      // ✅ FIX 2: uses the variable with fallback
+      const url = `${WEIGHMENT_API_URL}?from_date=${month}-01&key=ZIGMA-DELHI-WEIGHMENT-2025-SECURE`;
+      const res = await fetch(url);
+      const json = await res.json();
+      const data = Array.isArray(json?.data) ? json.data : [];
+      const normalized = data.map((row: any) => ({
+        ...row,
+        date:
+          row?.date ??
+          row?.Date ??
+          row?.collection_date ??
+          row?.collectionDate ??
+          "",
+      }));
+      setRows(normalized);
+    } catch (err) {
+      console.error("Failed to fetch weighment data:", err);
+      setRows([]);
+    }
+  };
+
+  useEffect(() => {
+    if (weighmentApiUrl) {
+      fetchMonthData(appliedMonth);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appliedMonth, weighmentApiUrl]);
+
+  /* ================= MASTER COUNTS ================= */
+
+  const fetchHouseholdStats = useCallback(
+    async (month: string) => {
+      let totalHouseholds = 0;
+      try {
+        const response = await customerCreationApi.readAll();
+        const normalized = normalizeCustomerArray(response);
+        const activeCustomers = filterActiveCustomers(normalized);
+        totalHouseholds = activeCustomers.length;
+        setTotalHouseholdCount(totalHouseholds);
+      } catch (err: any) {
+        // ✅ FIX 3: Log the auth error but keep the UI alive
+        console.warn(
+          "⚠️ Failed to fetch customer list (auth token missing?):",
+          err?.message || err
+        );
+        setTotalHouseholdCount(0);
+      }
+
+      try {
+        const response = await wasteCollectionApi.readAll();
+        const data = Array.isArray(response) ? response : [];
+        const filtered = month
+          ? data.filter((row: any) =>
+              toDateKey(getCollectionDateValue(row)).startsWith(month)
+            )
+          : data;
+        const countsByDateSets: Record<string, Set<string>> = {};
+        const totalCollectedSet = new Set<string>();
+        filtered.forEach((entry: any, index: number) => {
+          const dateKey = toDateKey(getCollectionDateValue(entry));
+          if (!dateKey) return;
+          const customerId = String(
+            entry.customer ??
+              entry.customer_id ??
+              entry.customer_unique_id ??
+              ""
+          ).trim();
+          const entryKey = String(
+            customerId ||
+              entry.unique_id ||
+              entry.id ||
+              entry.collection_id ||
+              index
+          ).trim();
+          if (!countsByDateSets[dateKey]) {
+            countsByDateSets[dateKey] = new Set();
+          }
+          countsByDateSets[dateKey].add(entryKey);
+          if (entryKey) {
+            totalCollectedSet.add(entryKey);
+          }
+        });
+
+        const countsByDate: Record<string, number> = {};
+        Object.entries(countsByDateSets).forEach(([dateKey, idSet]) => {
+          countsByDate[dateKey] = idSet.size;
+        });
+
+        setCollectedByDate(countsByDate);
+        setTotalCollectedCount(totalCollectedSet.size);
+      } catch (err: any) {
+        console.warn(
+          "⚠️ Failed to fetch waste collection data (auth token missing?):",
+          err?.message || err
+        );
+        setCollectedByDate({});
+        setTotalCollectedCount(0);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    fetchHouseholdStats(appliedMonth);
+  }, [appliedMonth, fetchHouseholdStats]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!VEHICLE_TRACKING_API) {
+          setVehicleTrackingCount(0);
+          return;
+        }
+        const res = await fetch(VEHICLE_TRACKING_API);
+        const body = await res.json();
+        const list = Array.isArray(body?.data) ? body.data : body;
+        const set = new Set<string>();
+        list?.forEach((r: any) => {
+          Object.values(r).forEach((v) => v && set.add(String(v)));
+        });
+        setVehicleTrackingCount(set.size);
+      } catch {
+        setVehicleTrackingCount(0);
+      }
+    })();
+  }, [VEHICLE_TRACKING_API]);
+
+  /* ================= SEARCH ================= */
+
+  const onGlobalFilterChange = (value: string) => {
+    setFilters({ global: { value, matchMode: FilterMatchMode.CONTAINS } });
+    setGlobalFilterValue(value);
+  };
+
+  const filteredRows = useMemo(
+    () => applyTableFilters(displayRows, filters, WASTE_SUMMARY_GLOBAL_FIELDS),
+    [displayRows, filters],
+  );
+
+  /* ================= EXPORT ================= */
+  const exportLabels = useMemo(
+    () => ({
+      date: t("admin.reports.waste_summary.columns.date"),
+      totalHousehold: t("admin.reports.waste_summary.columns.total_household"),
+      collected: t("admin.reports.waste_summary.columns.collected"),
+      notCollected: t("admin.reports.waste_summary.columns.not_collected"),
+      vehicleCount: t("admin.reports.waste_summary.columns.vehicle_count"),
+      tripCount: t("admin.reports.waste_summary.columns.trip_count"),
+      dryWeight: t("admin.reports.waste_summary.columns.dry_weight"),
+      wetWeight: t("admin.reports.waste_summary.columns.wet_weight"),
+      mixedWeight: t("admin.reports.waste_summary.columns.mixed_weight"),
+      weighment: t("admin.reports.waste_summary.columns.weighment"),
+      avgPerTrip: t("admin.reports.waste_summary.columns.avg_per_trip"),
+      sheetName: t("admin.reports.waste_summary.export_sheet"),
+      filePrefix: t("admin.reports.waste_summary.export_file_prefix"),
+    }),
+    [i18n.language, t]
+  );
+
+  const exportRows = useMemo(
+    () => filteredRows.map((r) => ({
+      [exportLabels.date]: r.date,
+      [exportLabels.totalHousehold]: totalHouseholdCount,
+      [exportLabels.collected]: totalCollectedCount,
+      [exportLabels.notCollected]:
+        totalHouseholdCount !== null
+          ? Math.max(totalHouseholdCount - (totalCollectedCount ?? 0), 0)
+          : null,
+      [exportLabels.vehicleCount]: getVehicleCount(r),
+      [exportLabels.tripCount]: parseNum(r.total_trip),
+      [exportLabels.dryWeight]: parseNum(r.dry_weight),
+      [exportLabels.wetWeight]: parseNum(r.wet_weight),
+      [exportLabels.mixedWeight]: parseNum(r.mix_weight),
+      [exportLabels.weighment]: parseNum(r.total_net_weight),
+      [exportLabels.avgPerTrip]: parseNum(r.average_weight_per_trip),
+    })),
+    [
+      exportLabels,
+      filteredRows,
+      getVehicleCount,
+      totalCollectedCount,
+      totalHouseholdCount,
+    ],
+  );
+
+  /* ================= UI ================= */
+
+  if (!contextLoading && !WEIGHMENT_API_URL) {
+    return (
+      <div className="p-3">
+        <ProjectSelectorBar />
+        <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+          <p className="text-base font-medium">
+            Weighment API URL is not configured for this project.
+          </p>
+          <p className="text-sm mt-1">
+            Set the Weighment API URL in the project settings.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-3">
+      <ProjectSelectorBar />
+      <div className="flex justify-between items-center mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-800 mb-1">
+            {t("admin.reports.waste_summary.title")}
+          </h1>
+          <p className="text-sm text-gray-500">
+            {t("admin.reports.waste_summary.subtitle")}
+          </p>
+        </div>
+      </div>
+
+      <DataTable
+        value={displayRows}
+        exportRows={exportRows}
+        exportSheetName={exportLabels.sheetName}
+        paginator
+        rows={10}
+        rowsPerPageOptions={[5, 10, 25, 50]}
+        filters={filters}
+        header={
+          <FilterBar
+            searchValue={globalFilterValue}
+            onSearchChange={onGlobalFilterChange}
+            searchPlaceholder={t("admin.reports.waste_summary.search_placeholder")}
+          />
+        }
+        stripedRows
+        showGridlines
+        emptyMessage={t("admin.reports.waste_summary.empty_message")}
+        globalFilterFields={WASTE_SUMMARY_GLOBAL_FIELDS}
+        filterPanel={combineFilters(monthFilterPart)}
+        className="p-datatable-sm"
+        fitWidth
+      >
+        <Column
+          header={t("admin.reports.waste_summary.columns.s_no")}
+          body={(_, o) => o.rowIndex + 1}
+          style={{ width: "6%" }}
+        />
+        <Column
+          field="date"
+          header={t("admin.reports.waste_summary.columns.date")}
+          sortable
+          style={{ width: "14%" }}
+        />
+        <Column
+          header={t("admin.reports.waste_summary.columns.total_household")}
+          style={{ width: "22%" }}
+          body={() => (
+            <StackCell
+              primary={formatNum(totalHouseholdCount)}
+              lines={[
+                {
+                  label: t("admin.reports.waste_summary.columns.collected"),
+                  value: formatNum(totalCollectedCount),
+                },
+                {
+                  label: t("admin.reports.waste_summary.columns.not_collected"),
+                  value: formatNum(
+                    totalHouseholdCount !== null
+                      ? Math.max(totalHouseholdCount - (totalCollectedCount ?? 0), 0)
+                      : null
+                  ),
+                },
+              ]}
+            />
+          )}
+        />
+        <Column
+          field="total_trip"
+          header={t("admin.reports.waste_summary.columns.trip_count")}
+          sortable
+          style={{ width: "16%" }}
+          body={(r) => (
+            <StackCell
+              primary={r.total_trip}
+              lines={[
+                {
+                  label: t("admin.reports.waste_summary.columns.vehicle_count"),
+                  value: formatNum(getVehicleCount(r)),
+                },
+              ]}
+            />
+          )}
+        />
+        <Column
+          header="Waste Split"
+          style={{ width: "22%" }}
+          body={(r) => (
+            <StackCell
+              lines={[
+                {
+                  label: t("admin.reports.waste_summary.columns.dry_weight"),
+                  value: r.dry_weight,
+                },
+                {
+                  label: t("admin.reports.waste_summary.columns.wet_weight"),
+                  value: r.wet_weight,
+                },
+                {
+                  label: t("admin.reports.waste_summary.columns.mixed_weight"),
+                  value: r.mix_weight,
+                },
+              ]}
+            />
+          )}
+        />
+        <Column
+          field="total_net_weight"
+          header={t("admin.reports.waste_summary.columns.weighment")}
+          sortable
+          style={{ width: "20%" }}
+          body={(r) => (
+            <StackCell
+              primary={r.total_net_weight}
+              lines={[
+                {
+                  label: t("admin.reports.waste_summary.columns.avg_per_trip"),
+                  value: Number(r.average_weight_per_trip).toFixed(2),
+                },
+              ]}
+            />
+          )}
+        />
+      </DataTable>
+    </div>
+  );
+}

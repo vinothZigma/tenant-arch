@@ -1,0 +1,560 @@
+import type { BinCERecord } from "./types";
+import type { TableFilters } from "./types";
+import { createCrudRoutePaths } from "@/utils/routePaths";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import Swal from "@/lib/notify";
+import { useTranslation } from "react-i18next";
+import { DataTable } from "@/components/common/SafeDataTable";
+import type { DataTableFilterEvent } from "@/components/common/SafeDataTable";
+import { Column } from "primereact/column";
+import { Button } from "primereact/button";
+import { FilterMatchMode } from "primereact/api";
+import { ActionMenu } from "@/components/ui/ActionMenu";
+import { binCollectionEventApi } from "@/helpers/admin";
+import { KpiCard } from "../dailyTripLog/tripLogDisplay";
+import { formatKg } from "../dailyTripLog/tripLogSummary";
+import { getEncryptedRoute } from "@/utils/routeCache";
+import { FilterBar } from "@/components/common/FilterBar";
+import { locationColumn } from "@/components/common/LocationColumn";
+import { StackCell } from "@/components/common/TableCells";
+import { FilterSection } from "@/components/common/ListToolbar";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
+import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import { combineFilters, useOptionFilter } from "@/components/filters/useOptionFilter";
+import { downloadRecordsPdf } from "@/utils/exportPdf";
+import { formatCollectionTime } from "@/utils/formatTime";
+import { wasteTypeColorClass } from "@/utils/wasteTypeColors";
+import { EvidenceImagePreview } from "@/components/common/EvidenceImagePreview";
+import { useScreenAccess } from "@/contexts/screenPermission";
+
+const extractError = (error: unknown): string | null => {
+  const data = (error as any)?.response?.data;
+  if (!data) return null;
+  if (typeof data === "string") return data;
+  if (typeof data?.detail === "string") return data.detail;
+  if (typeof data === "object") {
+    const first = Object.values(data)[0];
+    if (Array.isArray(first)) return String(first[0]);
+    if (typeof first === "string") return first;
+  }
+  return null;
+};
+
+const BreakdownCell = ({ row }: { row: BinCERecord }) => {
+  const bd = row.breakdown_info;
+  if (!bd) return <span className="text-xs text-gray-300">—</span>;
+
+  const isApproved = bd.approval_status === "APPROVED";
+  const isPending = bd.approval_status === "PENDING";
+
+  return (
+    <div className="space-y-1">
+      <span
+        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+          isApproved
+            ? "bg-green-100 text-green-700"
+            : isPending
+              ? "bg-orange-100 text-orange-700"
+              : "bg-red-100 text-red-700"
+        }`}
+      >
+        {isApproved ? "✓ Replaced" : isPending ? "⚠ Pending" : "✕ Rejected"}
+      </span>
+      {isApproved && bd.replacement_vehicle_no && (
+        <div className="text-[10px] text-gray-600 leading-tight">
+          <span className="font-medium">Veh:</span> {bd.replacement_vehicle_no}
+        </div>
+      )}
+      {isApproved && (bd.replacement_driver || bd.replacement_operator) && (
+        <div className="text-[10px] text-gray-600 leading-tight">
+          {bd.replacement_driver && (
+            <span>
+              <span className="font-medium">Drv:</span> {bd.replacement_driver}
+            </span>
+          )}
+          {bd.replacement_driver && bd.replacement_operator && (
+            <span className="mx-1">·</span>
+          )}
+          {bd.replacement_operator && (
+            <span>
+              <span className="font-medium">Opr:</span>{" "}
+              {bd.replacement_operator}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const formatDate = (val?: string) => {
+  if (!val) return "-";
+  return new Date(val).toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+};
+
+// A5: BinCollectionEvent.STATUS_CHOICES.
+const STATUS_OPTIONS = [
+  { value: "Collected", label: "Collected" },
+  { value: "Not Collected", label: "Not Collected" },
+  { value: "Collect Later", label: "Collect Later" },
+];
+
+const STATUS_STYLES: Record<string, string> = {
+  Collected: "bg-green-100 text-green-800",
+  "Not Collected": "bg-red-100 text-red-800",
+  "Collect Later": "bg-amber-100 text-amber-800",
+};
+
+const StatusBadge = ({ value }: { value?: string }) => (
+  <span
+    className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${STATUS_STYLES[value ?? ""] ?? "bg-gray-100 text-gray-600"}`}
+  >
+    {value ?? "Collected"}
+  </span>
+);
+
+const today = new Date().toISOString().split("T")[0];
+
+export default function BinCollectionEventList() {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { canAdd } = useScreenAccess();
+
+  const location = useLocation();
+  const restoredState = location.state as {
+    companyUniqueId?: string;
+    projectId?: string;
+  } | null;
+  const companyProject = useCompanyProjectFilter(undefined, {
+    initialCompanyId: restoredState?.companyUniqueId,
+    initialProjectId: restoredState?.projectId,
+  });
+  const { companyId: companyUniqueId, projectId } = companyProject;
+  const { companies, isSuperAdmin } = companyProject.selection;
+  const datePart = useDraftFilter({
+    empty: { collection_date: "" },
+    chips: { collection_date: { label: "Date" } },
+  });
+  // A5: viewset supports ward_id/zone_id/status query-param filters.
+  const statusPart = useOptionFilter({
+    param: "status",
+    label: "Status",
+    options: STATUS_OPTIONS,
+  });
+  const dateFilter = datePart.applied.collection_date;
+  const statusFilter = statusPart.value;
+
+  const { encScheduleOperations, encBinCollectionEvent } = getEncryptedRoute();
+  const { newPath: NEW_PATH } = createCrudRoutePaths(
+    encScheduleOperations,
+    encBinCollectionEvent,
+  );
+  const { editPath: VIEW_PATH } = createCrudRoutePaths(
+    encScheduleOperations,
+    encBinCollectionEvent,
+  );
+
+  const [records, setRecords] = useState<BinCERecord[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [globalFilterValue, setGlobalFilterValue] = useState("");
+  const [filters, setFilters] = useState<TableFilters>({
+    global: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    _trip_plan: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    _collection_point: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    _bin: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    _waste_type: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    _panchayat: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    _ward: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    _zone: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    collection_date: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    status: { value: null, matchMode: FilterMatchMode.CONTAINS },
+  });
+
+  const loadRecords = useCallback(() => {
+    if (isSuperAdmin && companies.length === 0) {
+      setRecords([]);
+      return;
+    }
+    if (!companyUniqueId && !isSuperAdmin) {
+      setRecords([]);
+      return;
+    }
+    setLoading(true);
+    const params: Record<string, string> = {};
+    if (companyUniqueId) params.company_id = companyUniqueId;
+    if (projectId) params.project_id = projectId;
+    if (dateFilter) params.collection_date = dateFilter;
+    if (statusFilter) params.status = statusFilter;
+    binCollectionEventApi
+      .readAll({ params })
+      .then((data) =>
+        setRecords(Array.isArray(data) ? (data as BinCERecord[]) : []),
+      )
+      .catch((error) => {
+        setRecords([]);
+        Swal.fire(
+          t("common.error"),
+          extractError(error) ?? t("common.fetch_failed"),
+          "error",
+        );
+      })
+      .finally(() => setLoading(false));
+  }, [
+    companyUniqueId,
+    projectId,
+    isSuperAdmin,
+    companies.length,
+    dateFilter,
+    statusFilter,
+    t,
+  ]);
+
+  useEffect(() => {
+    loadRecords();
+  }, [loadRecords]);
+
+  const rows = useMemo(
+    () =>
+      records.map((r) => ({
+        ...r,
+        _trip_plan: r.trip_plan?.display_code ?? r.trip_assignment_id ?? "-",
+        _collection_point:
+          r.collection_point?.cp_name ?? r.collection_point_id ?? "-",
+        _bin: r.bin?.bin_name ?? "-",
+        _waste_type: r.waste_type?.waste_type_name ?? "-",
+        _vehicle: r.vehicle?.vehicle_no ?? "-",
+        _panchayat: r.panchayat_name ?? r.panchayat_id ?? "-",
+        _ward: r.ward_name ?? r.ward_id ?? "-",
+        _zone:
+          typeof r.zone_name === "object" && r.zone_name !== null
+            ? ((r.zone_name as Record<string, unknown>).zone_name ?? "-")
+            : (r.zone_name ?? "-"),
+        collection_date: r.collection_date ?? "",
+        status: r.status ?? "Collected",
+      })),
+    [records],
+  );
+
+  /* ── apply filters locally to get the visible subset ─────────────────────
+     PrimeReact filters internally but doesn't expose the result. We replicate
+     the same CONTAINS logic so the summary pills always match what's on screen. */
+  const GLOBAL_FIELDS = [
+    "_trip_plan",
+    "_collection_point",
+    "_bin",
+    "_waste_type",
+    "_panchayat",
+    "_ward",
+    "_zone",
+    "collection_date",
+    "status",
+  ] as const;
+  type FilterableField = (typeof GLOBAL_FIELDS)[number];
+  const isFilterableField = (field: string): field is FilterableField =>
+    (GLOBAL_FIELDS as readonly string[]).includes(field);
+
+  const filteredRows = useMemo(() => {
+    return rows.filter((row) => {
+      for (const [field, filter] of Object.entries(filters)) {
+        const val = filter.value;
+        if (!val) continue;
+        const needle = String(val).toLowerCase();
+        if (field === "global") {
+          const hit = GLOBAL_FIELDS.some((f) =>
+            String(row[f] ?? "")
+              .toLowerCase()
+              .includes(needle),
+          );
+          if (!hit) return false;
+        } else if (isFilterableField(field)) {
+          if (
+            !String(row[field] ?? "")
+              .toLowerCase()
+              .includes(needle)
+          )
+            return false;
+        }
+      }
+      return true;
+    });
+  }, [rows, filters]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const buildExportRows = () =>
+    filteredRows.map((r) => ({
+      "Trip Plan": r._trip_plan,
+      "Collection Point": r._collection_point,
+      PLB: r._panchayat,
+      Ward: r._ward,
+      Zone: r._zone,
+      Bin: r._bin,
+      "Waste Type": r._waste_type,
+      Vehicle: r._vehicle,
+      "Weight (kg)": r.collected_weight_kg ?? "-",
+      "Collection Date": r.collection_date,
+      "Collection Time": formatCollectionTime(r.created_at),
+      Status: r.status ?? "Collected",
+    }));
+
+  const handleDownloadPdf = async () => {
+    const exportRows = buildExportRows();
+    if (exportRows.length === 0) {
+      Swal.fire({
+        icon: "warning",
+        title: "No records",
+        text: "There are no secondary bin collection events to export.",
+      });
+      return;
+    }
+    await downloadRecordsPdf({
+      title: "Secondary Bin Collection Events",
+      filename: "secondary_bin_collection_events.pdf",
+      rows: exportRows,
+      columns: Object.keys(exportRows[0]).map((key) => ({ key, label: key })),
+    });
+  };
+
+  /* ── summary stats — computed from filtered rows only ── */
+  const { dailyWeight, dailyCount, overallWeight, totalRecords } = useMemo(() => {
+    let daily = 0;
+    let dailyEvents = 0;
+    let overall = 0;
+    filteredRows.forEach((r) => {
+      const w = Number(r.collected_weight_kg ?? 0);
+      overall += w;
+      if (r.collection_date === today) {
+        daily += w;
+        dailyEvents += 1;
+      }
+    });
+    return {
+      dailyWeight: daily,
+      dailyCount: dailyEvents,
+      overallWeight: overall,
+      totalRecords: filteredRows.length,
+    };
+  }, [filteredRows]);
+
+  const dateField = (
+    <FilterSection label="Collection date">
+      <input
+        type="date"
+        value={datePart.draft.collection_date}
+        onChange={(e) => datePart.setField("collection_date", e.target.value)}
+        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+        aria-label="Collection date"
+      />
+    </FilterSection>
+  );
+
+  const renderHeader = (actions: ReactNode) => (
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-2xl font-semibold text-gray-800">
+          Secondary Bin Collection Events
+        </h1>
+        <p className="text-sm text-gray-500">
+          Scan audit log — one record per operator bin scan
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <KpiCard
+          icon="pi pi-box"
+          tone="bg-emerald-50 text-emerald-600"
+          label="Overall weight"
+          value={formatKg(overallWeight)}
+          hint={`${totalRecords.toLocaleString()} collections`}
+        />
+        <KpiCard
+          icon="pi pi-calendar"
+          tone="bg-cyan-50 text-cyan-600"
+          label="Today's weight"
+          value={formatKg(dailyWeight)}
+          hint={`${dailyCount.toLocaleString()} collections today`}
+        />
+      </div>
+
+      {/* Global search + Add button + Filters / Documents */}
+      <FilterBar
+        searchValue={globalFilterValue}
+        onSearchChange={(value) => {
+          setGlobalFilterValue(value);
+          setFilters((f) => ({
+            ...f,
+            global: { value, matchMode: FilterMatchMode.CONTAINS },
+          }));
+        }}
+        searchPlaceholder={t("common.search_placeholder")}
+        trailing={
+          <div className="flex flex-wrap items-center gap-2">
+            {canAdd && (
+              <Button
+                label="Add Secondary Bin Collection Event"
+                icon="pi pi-plus"
+                className="p-button-success p-button-sm"
+                onClick={() =>
+                  navigate(NEW_PATH, { state: { companyUniqueId, projectId } })
+                }
+              />
+            )}
+            {actions}
+          </div>
+        }
+      />
+    </div>
+  );
+
+  return (
+    <div className="p-3">
+      <DataTable
+        loadExportRows={async () => buildExportRows()}
+        onPdfRequest={handleDownloadPdf}
+        value={rows}
+        dataKey="unique_id"
+        paginator
+        rows={10}
+        loading={loading}
+        filters={filters}
+        onFilter={(e: DataTableFilterEvent) =>
+          setFilters(e.filters as TableFilters)
+        }
+        globalFilterFields={[
+          "_trip_plan",
+          "_collection_point",
+          "_bin",
+          "_waste_type",
+          "_panchayat",
+          "_ward",
+          "_zone",
+          "collection_date",
+        ]}
+        renderHeaderWithActions={renderHeader}
+        filterPanel={combineFilters(
+          companyProject,
+          { ...datePart, field: dateField },
+          statusPart,
+        )}
+        exportable={false}
+        stripedRows
+        showGridlines
+        fitWidth
+        className="p-datatable-sm"
+        emptyMessage="No secondary bin collection events found"
+      >
+        <Column
+          header={t("common.s_no")}
+          body={(_, { rowIndex }) => rowIndex + 1}
+          style={{ width: "4%" }}
+        />
+        <Column
+          field="_trip_plan"
+          header="Trip Plan"
+          filter
+          showFilterMatchModes={false}
+          style={{ width: "22%" }}
+          body={(row: (typeof rows)[number]) => (
+            <StackCell
+              primary={row._trip_plan}
+              lines={[
+                { icon: "pi-map-marker", value: row._collection_point, title: "Collection Point" },
+                { label: "Bin", value: row._bin },
+              ]}
+            />
+          )}
+        />
+        {locationColumn<(typeof rows)[number]>({
+          header: "Location",
+          style: { width: "14%" },
+          levels: [
+            { label: "Panchayat", value: (row) => String(row._panchayat) },
+            { label: "Zone", value: (row) => String(row._zone) },
+            { label: "Ward", value: (row) => String(row._ward) },
+          ],
+        })}
+        <Column
+          field="_waste_type"
+          header="Waste Type"
+          filter
+          showFilterMatchModes={false}
+          style={{ width: "11%" }}
+          body={(row: BinCERecord & { _waste_type?: string }) => (
+            <span
+              className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${wasteTypeColorClass(row._waste_type)}`}
+            >
+              {row._waste_type ?? "-"}
+            </span>
+          )}
+        />
+        <Column
+          field="_vehicle"
+          header="Vehicle"
+          style={{ width: "18%" }}
+          body={(row: (typeof rows)[number]) => (
+            <StackCell
+              primary={row._vehicle}
+              lines={[row.breakdown_info ? <BreakdownCell row={row} /> : null]}
+            />
+          )}
+        />
+        <Column
+          field="collection_date"
+          header="Collected"
+          filter
+          showFilterMatchModes={false}
+          style={{ width: "13%" }}
+          body={(row: BinCERecord) => (
+            <StackCell
+              primary={formatDate(row.collection_date)}
+              lines={[
+                { icon: "pi-clock", value: formatCollectionTime(row.created_at) },
+                { label: "Weight (kg)", value: row.collected_weight_kg },
+              ]}
+            />
+          )}
+        />
+        <Column
+          field="status"
+          header="Status"
+          filter
+          showFilterMatchModes={false}
+          style={{ width: "12%" }}
+          body={(row: BinCERecord) => (
+            <StackCell
+              primary={<StatusBadge value={row.status} />}
+              lines={[
+                row.status_evidence_image_url ? (
+                  <EvidenceImagePreview
+                    url={row.status_evidence_image_url}
+                    label={`Bin status evidence ${row.unique_id ?? ""}`}
+                  />
+                ) : null,
+              ]}
+            />
+          )}
+        />
+        <Column
+          header={t("common.actions")}
+          style={{ width: "6%" }}
+          body={(row: BinCERecord) => (
+            <div className="flex justify-center">
+              <ActionMenu
+                editLabel="View"
+                onEdit={() =>
+                  navigate(VIEW_PATH(row.unique_id ?? ""), {
+                    state: { companyUniqueId, projectId },
+                  })
+                }
+              />
+            </div>
+          )}
+        />
+      </DataTable>
+    </div>
+  );
+}

@@ -1,0 +1,325 @@
+from django.db.models import Count, Q, Sum
+from django.utils import timezone
+from drf_yasg.utils import swagger_auto_schema
+from rest_framework import status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+from app.models.core_modules.daily_operations.daily_trip_log import DailyTripLog
+from app.serializers.core_modules.daily_operations.daily_trip_log_serializer import (
+    DailyTripLogSerializer,
+    DailyTripLogVerifySerializer,
+)
+from app.utils.audit_mixin import AuditViewSetMixin
+from app.utils.pagination import LimitOffsetWithPage
+from app.viewsets.superadmin_masters.company_scoped_viewset import CompanyScopedViewSet
+from app.utils.filters import (
+    ModelFieldQueryFilter,
+    ModelFieldSearchFilter,
+    SerializerOrderingFilter,
+)
+from app.utils.bulk_upload_mixin import BulkUploadMixin
+
+
+class DailyTripLogViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScopedViewSet):
+    # NOTE: no select_related()/prefetch_related() here — every *_id field on
+    # this model (company_id, trip_assignment_id, driver_id, etc.) is this
+    # codebase's plain "string-pseudo-FK" CharField, not a real Django
+    # relation, so select_related() on any of them raises FieldError; and
+    # bin_ids/extra_operator_ids are comma-separated TextFields, not
+    # relations, so prefetch_related() on them is equally invalid. Related
+    # rows are resolved individually via the model's @property accessors
+    # instead (see DailyTripLog.trip_assignment/.driver/etc. and the
+    # serializer's get_* methods).
+    queryset = DailyTripLog.objects.filter(is_deleted=False)
+    serializer_class = DailyTripLogSerializer
+    lookup_field = "unique_id"
+    permission_resource = "DailyTripLog"
+    pagination_class = LimitOffsetWithPage
+    filter_backends = [
+        ModelFieldQueryFilter,
+        ModelFieldSearchFilter,
+        SerializerOrderingFilter,
+    ]
+
+    AUDIT_MODULE = "trip-logs"
+    AUDIT_ENDPOINT = "daily-trip-logs"
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+
+        trip_date = params.get("date") or params.get("trip_date")
+        status_value = params.get("status") or params.get("log_status")
+        assignment = params.get("trip_assignment_id")
+        panchayat = params.get("panchayat_id")
+        zone = params.get("zone_id")
+        collection_point = params.get("collection_point_id")
+        # Accepts either repeated params (?waste_type_id=A&waste_type_id=B) or a
+        # single comma-separated value (?waste_type_id=A,B) for multi-select filtering.
+        waste_types = [
+            v
+            for raw in params.getlist("waste_type_id")
+            for v in raw.split(",")
+            if v
+        ]
+        driver = params.get("driver_id")
+        operator = params.get("operator_id")
+        search = params.get("search") or params.get("q")
+        mine = params.get("mine")
+
+        mine_requested = mine and str(mine).lower() in ("1", "true", "yes")
+
+        if mine_requested or self._is_supervisor_user():
+            # Logs whose trip plan this supervisor owns
+            # (TripPlan.supervisor_id == requester). Auto-enforced for any
+            # supervisor role on the admin web app too, not just when the
+            # mobile app explicitly passes mine=true.
+            from app.models.core_modules.schedule_setup.trip_plan import TripPlan
+            from app.models.core_modules.daily_operations.daily_trip_assignment import DailyTripAssignment
+
+            supervised_plan_ids = TripPlan.objects.filter(
+                supervisor_id=self.request.user.staff_unique_id,
+            ).values("unique_id")
+            supervised_assignment_ids = DailyTripAssignment.objects.filter(
+                trip_plan_id__in=supervised_plan_ids,
+            ).values("unique_id")
+            qs = qs.filter(trip_assignment_id__in=supervised_assignment_ids)
+
+        if trip_date:
+            qs = qs.filter(trip_date=trip_date)
+        if status_value:
+            qs = qs.filter(log_status=status_value)
+        if assignment:
+            qs = qs.filter(trip_assignment_id=assignment)
+        if panchayat:
+            qs = qs.filter(panchayat_id=panchayat)
+        if zone:
+            qs = qs.filter(trip_assignment_id__trip_plan_id__zone_id=zone)
+        if collection_point:
+            qs = qs.filter(collection_point_id=collection_point)
+        if waste_types:
+            # A trip carries several waste types, stored in the log's own
+            # `waste_type_id`, the assignment's `waste_types` M2M and its
+            # `waste_type_ids` JSON list. Match any of them so filtering by a
+            # trip's secondary waste type still returns it, mirroring the set
+            # the list shows.
+            waste_filter = (
+                Q(waste_type_id__in=waste_types)
+                | Q(trip_assignment_id__waste_types__unique_id__in=waste_types)
+                | Q(trip_assignment_id__trip_plan_id__waste_type_id__in=waste_types)
+            )
+            for waste_type in waste_types:
+                waste_filter |= Q(trip_assignment_id__waste_type_ids__icontains=waste_type)
+            qs = qs.filter(waste_filter).distinct()
+        if driver:
+            qs = qs.filter(driver_id=driver)
+        if operator:
+            qs = qs.filter(operator_id=operator)
+        if search:
+            qs = qs.filter(
+                Q(unique_id__icontains=search)
+                | Q(trip_assignment_id__unique_id__icontains=search)
+                | Q(collection_point_id__cp_name__icontains=search)
+                | Q(waste_type_id__waste_type_name__icontains=search)
+                | Q(driver_id__employee_name__icontains=search)
+                | Q(operator_id__employee_name__icontains=search)
+                | Q(vehicle_id__vehicle_no__icontains=search)
+            )
+
+        ordering = params.get("ordering")
+        allowed_ordering = {
+            "unique_id",
+            "-unique_id",
+            "trip_date",
+            "-trip_date",
+            "collected_weight_kg",
+            "-collected_weight_kg",
+            "log_status",
+            "-log_status",
+            "created_at",
+            "-created_at",
+        }
+        if ordering in allowed_ordering:
+            qs = qs.order_by(ordering)
+
+        return qs
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.log_status == DailyTripLog.LOG_STATUS_VERIFIED:
+            return Response(
+                {"detail": "Verified trip logs are read-only."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().update(request, *args, **kwargs)
+
+    def perform_destroy(self, instance):
+        if instance.log_status == DailyTripLog.LOG_STATUS_VERIFIED:
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError("Verified trip logs are read-only.")
+
+        previous_data = self._serialize_instance(instance)
+        instance.is_deleted = True
+        instance.is_active = False
+        instance.save(update_fields=["is_deleted", "is_active", "updated_at"])
+        self.log_audit(
+            self.request,
+            instance=instance,
+            previous_data=previous_data,
+            new_data=self._serialize_instance(instance),
+        )
+
+    # ---------------------------------------------------------
+    # GET /schedule-operations/daily-trip-logs/summary/
+    # ---------------------------------------------------------
+    @action(detail=False, methods=["get"], url_path="summary")
+    def summary(self, request):
+        """KPI totals for the list page over EVERY log matching the list's
+        own filters (search, date, waste type, status, company/project) —
+        not just the page on screen."""
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+        today = timezone.localdate()
+
+        totals = qs.aggregate(
+            total_logs=Count("pk", distinct=True),
+            trips=Count("trip_assignment_id", distinct=True),
+            bin_weight_kg=Sum("collected_weight_kg"),
+            household_weight_kg=Sum("household_collected_weight_kg"),
+        )
+        today_totals = qs.filter(trip_date=today).aggregate(
+            bin=Sum("collected_weight_kg"),
+            household=Sum("household_collected_weight_kg"),
+        )
+        status_counts = {
+            row["log_status"]: row["n"]
+            for row in qs.values("log_status").annotate(n=Count("pk", distinct=True))
+        }
+
+        def kg(value):
+            return round(float(value or 0), 2)
+
+        bin_kg = kg(totals["bin_weight_kg"])
+        household_kg = kg(totals["household_weight_kg"])
+        return Response({
+            "total_logs": totals["total_logs"],
+            "trips": totals["trips"],
+            "bin_weight_kg": bin_kg,
+            "household_weight_kg": household_kg,
+            "total_weight_kg": round(bin_kg + household_kg, 2),
+            "today_weight_kg": round(kg(today_totals["bin"]) + kg(today_totals["household"]), 2),
+            "status_counts": {
+                status_value: status_counts.get(status_value, 0)
+                for status_value, _ in DailyTripLog.LOG_STATUS_CHOICES
+            },
+        })
+
+    @swagger_auto_schema(request_body=DailyTripLogVerifySerializer)
+    @action(detail=True, methods=["patch"], url_path="verify")
+    def verify(self, request, unique_id=None):
+        instance = self.get_object()
+        serializer = DailyTripLogVerifySerializer(
+            data=request.data,
+            context={
+                "instance": instance,
+                "request": request,
+                "account": self._get_account(),
+            },
+        )
+        serializer.is_valid(raise_exception=True)
+
+        previous_data = self._serialize_instance(instance)
+        instance = serializer.save()
+        self.log_audit(
+            request,
+            instance=instance,
+            previous_data=previous_data,
+            new_data=self._serialize_instance(instance),
+        )
+
+        return Response(
+            DailyTripLogSerializer(instance, context={"request": request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @swagger_auto_schema(request_body=DailyTripLogVerifySerializer)
+    @action(detail=True, methods=["patch"], url_path="change-status")
+    def change_status(self, request, unique_id=None):
+        instance = self.get_object()
+        new_status = request.data.get("log_status", "").strip()
+        remarks = request.data.get("remarks", "")
+
+        valid = {
+            DailyTripLog.LOG_STATUS_UNVERIFIED,
+            DailyTripLog.LOG_STATUS_VERIFIED,
+        }
+        if new_status not in valid:
+            return Response(
+                {"detail": f"Invalid status. Valid options: {', '.join(sorted(valid))}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if new_status == instance.log_status:
+            return Response(
+                {"detail": f"Log is already in '{new_status}' status."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if new_status == DailyTripLog.LOG_STATUS_VERIFIED and not instance.actual_end_time:
+            return Response(
+                {"detail": "This trip hasn't ended yet — actual end time is required before it can be verified."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_data = self._serialize_instance(instance)
+        account = self._get_account()
+        now = timezone.now()
+
+        update_fields = {
+            "log_status": new_status,
+            "updated_at": now,
+        }
+        if remarks:
+            update_fields["remarks"] = remarks
+        if new_status == DailyTripLog.LOG_STATUS_VERIFIED:
+            update_fields["verified_by_id"] = account.pk if account else None
+            update_fields["verified_at"] = now
+        elif new_status == DailyTripLog.LOG_STATUS_UNVERIFIED:
+            update_fields["verified_by_id"] = None
+            update_fields["verified_at"] = None
+
+        DailyTripLog.objects.filter(pk=instance.pk).update(**update_fields)
+        instance.refresh_from_db()
+
+        self.log_audit(
+            request,
+            instance=instance,
+            previous_data=previous_data,
+            new_data=self._serialize_instance(instance),
+        )
+
+        return Response(
+            DailyTripLogSerializer(instance, context={"request": request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+    def perform_create(self, serializer):
+        previous_data = None
+        super().perform_create(serializer)
+        instance = serializer.instance
+        self.log_audit(
+            self.request,
+            instance=instance,
+            previous_data=previous_data,
+            new_data=self._serialize_instance(instance),
+        )
+
+    def perform_update(self, serializer):
+        previous_data = self._serialize_instance(serializer.instance)
+        super().perform_update(serializer)
+        instance = serializer.instance
+        self.log_audit(
+            self.request,
+            instance=instance,
+            previous_data=previous_data,
+            new_data=self._serialize_instance(instance),
+        )

@@ -1,0 +1,28 @@
+from rest_framework import filters
+from rest_framework import viewsets
+from app.models.superadmin.staff_management.department import Department
+from app.serializers.superadmin.staff_management.department_serializer import DepartmentSerializer
+from app.utils.audit_mixin import AuditViewSetMixin
+from app.utils.pagination import LimitOffsetWithPage
+from app.viewsets.superadmin_masters.company_scoped_viewset import CompanyScopedViewSet
+from app.utils.bulk_upload_mixin import BulkUploadMixin
+
+
+class DepartmentViewSet(BulkUploadMixin, AuditViewSetMixin, viewsets.ModelViewSet):
+    queryset = Department.objects.filter(is_deleted=False)
+    serializer_class = DepartmentSerializer
+    lookup_field = "unique_id"
+    permission_resource = "Department"
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    pagination_class = LimitOffsetWithPage
+    search_fields = ["department_name", "department_code", "description"]
+    ordering_fields = ["department_name", "department_code", "created_at"]
+    AUDIT_MODULE = "masters"
+    AUDIT_ENDPOINT = "departments"
+
+    def get_queryset(self):
+        queryset = Department.objects.filter(is_deleted=False)
+        status_value = self.request.query_params.get("status")
+        if status_value in {"active", "inactive"}:
+            queryset = queryset.filter(is_active=status_value == "active")
+        return queryset

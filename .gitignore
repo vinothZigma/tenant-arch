@@ -1,0 +1,22 @@
+# Python
+**/__pycache__/
+*.pyc
+
+# Django migrations
+**/migrations/
+
+# Django/env
+backend/.venv/
+backend/.env
+backend/db.sqlite3
+backend/media/
+staticfiles/
+
+# Node (frontend/.gitignore also covers this locally)
+node_modules/
+dist/
+
+# Multi-tenancy: DB backups and SQLite fallback DBs
+.backups/
+iwms-backend/tenant_dbs/
+iwms-backend/master.sqlite3

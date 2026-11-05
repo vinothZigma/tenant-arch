@@ -1,0 +1,489 @@
+"""
+Unit tests for LoginViewSet.
+
+Coverage targets:
+  - login_viewset.py  : all branches (platform/staff/customer/contractor, company resolution)
+"""
+import pytest
+from unittest.mock import patch, MagicMock
+
+LOGIN_BASE = "/api/v1/login/login-user/"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_platform_user(db):
+    from app.models.superadmin_masters.auth_user import User
+    return User.objects.create_superuser(
+        username="platform_admin",
+        password="Platform@123",
+        unique_id="U-PLATFORM-01",
+    )
+
+
+def _make_non_superuser_token(db, username, unique_id):
+    """Create superuser, downgrade to non-superuser in DB, return JWT string."""
+    from app.models.superadmin_masters.auth_user import User
+    from rest_framework_simplejwt.tokens import AccessToken
+    user = User.objects.create_superuser(
+        username=username, password="Pass@1234", unique_id=unique_id,
+    )
+    user.is_superuser = False
+    user.save()
+    token = AccessToken.for_user(user)
+    token["unique_id"] = user.unique_id
+    return str(token)
+
+
+def _mock_serializer(user, user_type, profile_object=None, extra=None):
+    """Build (MockSerializerClass, configured mock instance) for patching."""
+    validated = {
+        "user": user,
+        "permissions": {},
+        "permission_details": {},
+        "column_permissions": {},
+        "user_type": user_type,
+        "profile_object": profile_object,
+        "company_unique_id": None,
+        "staffusertype_id": None,
+        "contractorusertype_id": None,
+        "projects": [],
+    }
+    if extra:
+        validated.update(extra)
+    mock_inst = MagicMock()
+    mock_inst.is_valid.return_value = True
+    mock_inst.validated_data = validated
+    return mock_inst
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LOGIN FAILURE PATHS  (regression)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginFailure:
+    def test_missing_credentials_returns_error(self, api_client):
+        resp = api_client.post(LOGIN_BASE, {}, format="json")
+        assert resp.status_code in (400, 401)
+
+    def test_wrong_password_returns_error(self, api_client):
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "nobody", "password": "wrong"}, format="json"
+        )
+        assert resp.status_code in (400, 401)
+
+    def test_failure_creates_login_audit(self, api_client):
+        from app.models.superadmin.audits.loginAudit import LoginAudit
+        before = LoginAudit.objects.filter(success=False).count()
+        api_client.post(LOGIN_BASE, {"username": "audit_user", "password": "bad"}, format="json")
+        after = LoginAudit.objects.filter(success=False).count()
+        assert after > before
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PLATFORM LOGIN SUCCESS  (lines 65-75, 151-157)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginPlatformSuccess:
+    def test_platform_login_returns_200(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        assert resp.status_code == 200
+
+    def test_platform_login_has_access_token(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        assert "access_token" in resp.data and resp.data["access_token"] != ""
+
+    def test_platform_login_expected_keys(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        for key in ("unique_id", "user_type", "name", "role", "permissions",
+                    "access_token", "token_type", "expires_in", "profile"):
+            assert key in resp.data, f"Missing key: {key}"
+
+    def test_platform_login_user_type_is_platform(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        assert resp.data["user_type"] == "platform"
+
+    def test_platform_login_role_is_superadmin(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        assert resp.data["role"] == "superadmin"
+
+    def test_platform_login_profile_keys(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        profile = resp.data["profile"]
+        assert "platform_username" in profile
+        assert profile["is_superuser"] is True
+
+    def test_platform_login_success_audit_created(self, api_client, db):
+        from app.models.superadmin.audits.loginAudit import LoginAudit
+        _make_platform_user(db)
+        before = LoginAudit.objects.filter(success=True).count()
+        api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        after = LoginAudit.objects.filter(success=True).count()
+        assert after > before
+
+    def test_platform_login_token_type_is_bearer(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        assert resp.data["token_type"] == "Bearer"
+
+    def test_platform_login_expires_in_positive(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "platform_admin", "password": "Platform@123"}, format="json"
+        )
+        assert resp.data["expires_in"] > 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LOGIN TYPE PARAM
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginTypeParam:
+    def test_login_type_platform_explicit(self, api_client, db):
+        _make_platform_user(db)
+        resp = api_client.post(
+            LOGIN_BASE,
+            {"username": "platform_admin", "password": "Platform@123", "login_type": "platform"},
+            format="json",
+        )
+        assert resp.status_code == 200
+
+    def test_login_type_wrong_rejects(self, api_client):
+        resp = api_client.post(
+            LOGIN_BASE, {"username": "nobody", "password": "x", "login_type": "platform"}, format="json"
+        )
+        assert resp.status_code in (400, 401)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STAFF BRANCH  (lines 76-99, 131-141)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginStaffBranch:
+    def _user(self, db, suffix="01"):
+        from app.models.superadmin_masters.auth_user import User
+        return User.objects.create_superuser(
+            username=f"staff_u{suffix}", password="P@ss123", unique_id=f"U-STAFF-{suffix}"
+        )
+
+    def test_staff_login_with_encrypted_password_returns_200(
+        self,
+        api_client,
+        company,
+        project,
+        user_type,
+    ):
+        from app.models.superadmin.role_management.staffUserType import StaffUserType
+        from app.models.superadmin.staff_management.staffcreation import Staffcreation
+        from app.utils.password_encryption import encrypt_password
+
+        staff_user_type = StaffUserType.objects.create(
+            usertype_id=user_type.unique_id,
+            name="company_admin",
+            company_id=company.unique_id,
+            project_id=project.unique_id,
+        )
+        Staffcreation.objects.create(
+            username="admin",
+            password=encrypt_password("12345678"),
+            employee_name="admin",
+            company_id=company.unique_id,
+            project_id=project.unique_id,
+            user_type_id=user_type.unique_id,
+            staffusertype_id=staff_user_type.unique_id,
+            approval_status=Staffcreation.APPROVAL_APPROVED,
+            login_enabled=True,
+        )
+
+        resp = api_client.post(
+            LOGIN_BASE,
+            {"username": "admin", "password": "12345678"},
+            format="json",
+        )
+
+        assert resp.status_code == 200
+        assert resp.data["user_type"] == "staff"
+
+    def test_staff_login_returns_200(self, api_client, db):
+        user = self._user(db, "01")
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "staff")
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data["user_type"] == "staff"
+
+    def test_staff_login_profile_has_staff_fields(self, api_client, db):
+        user = self._user(db, "02")
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "staff")
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        profile = resp.data["profile"]
+        assert "staff_unique_id" in profile
+        assert "employee_id" in profile
+        assert "staffusertype_unique_id" in profile
+
+    def test_staff_login_role_from_role_type(self, api_client, db):
+        """Lines 85-86: role resolved from staffusertype_id.name."""
+        user = self._user(db, "03")
+        mock_role = MagicMock()
+        mock_role.name = "field_operator"
+        mock_profile = MagicMock()
+        mock_profile.employee_name = "Field Worker"
+        mock_profile.staffusertype_id = mock_role
+        mock_profile.contractorusertype_id = None
+        mock_profile.company_id = None
+        mock_profile.staff_unique_id = "STAFF-FW-01"
+        mock_profile.emp_id = None
+        mock_profile.personal_details = None
+
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "staff", profile_object=mock_profile)
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data["role"] == "field_operator"
+
+    def test_staff_login_personal_details_email(self, api_client, db):
+        """Line 89-90: email from personal_details.contact_email."""
+        user = self._user(db, "04")
+        mock_personal = MagicMock()
+        mock_personal.contact_email = "worker@test.com"
+        mock_profile = MagicMock()
+        mock_profile.employee_name = "Worker"
+        mock_profile.staffusertype_id = None
+        mock_profile.contractorusertype_id = None
+        mock_profile.company_id = None
+        mock_profile.staff_unique_id = None
+        mock_profile.emp_id = None
+        mock_profile.personal_details = mock_personal
+
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "staff", profile_object=mock_profile)
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data.get("email") == "worker@test.com"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CUSTOMER BRANCH  (lines 60-64, 142-150)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginCustomerBranch:
+    def _user(self, db, suffix="01"):
+        from app.models.superadmin_masters.auth_user import User
+        return User.objects.create_superuser(
+            username=f"cust_u{suffix}", password="P@ss123", unique_id=f"U-CUST-{suffix}"
+        )
+
+    def test_customer_login_returns_200(self, api_client, db):
+        user = self._user(db, "01")
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "customer")
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data["user_type"] == "customer"
+        assert resp.data["role"] == "customer"
+
+    def test_customer_login_profile_has_customer_fields(self, api_client, db):
+        """Lines 142-150: customer profile_payload fields."""
+        user = self._user(db, "02")
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "customer")
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        profile = resp.data["profile"]
+        assert "customer_unique_id" in profile
+        assert "customer_name" in profile
+        assert "contact_no" in profile
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONTRACTOR BRANCH  (lines 76-80, 158-168)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginContractorBranch:
+    def _user(self, db, suffix="01"):
+        from app.models.superadmin_masters.auth_user import User
+        return User.objects.create_superuser(
+            username=f"contr_u{suffix}", password="P@ss123", unique_id=f"U-CONTR-{suffix}"
+        )
+
+    def test_contractor_login_returns_200(self, api_client, db):
+        user = self._user(db, "01")
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "contractor")
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data["user_type"] == "contractor"
+
+    def test_contractor_login_profile_has_contractor_fields(self, api_client, db):
+        """Lines 158-168: contractor profile_payload fields."""
+        user = self._user(db, "02")
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "contractor")
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        profile = resp.data["profile"]
+        assert "contractorusertype_unique_id" in profile
+        assert "emp_id" in profile
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LOGIN — pk fallback unique_id  (line 107)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginPkFallback:
+    def test_unique_id_falls_back_to_pk(self, api_client, db):
+        """Line 107: user has no unique_id/staff_unique_id → str(user.pk) used."""
+        from app.models.superadmin_masters.auth_user import User
+        real_user = User.objects.create_superuser(
+            username="fallback_u", password="P@ss123", unique_id="U-FALLBACK-01"
+        )
+
+        class DummyUser:
+            unique_id = None
+            staff_unique_id = None
+            employee_name = None
+            username = "fallback_u"
+            email = None
+            company_id = None
+            is_superuser = True
+
+            def __init__(self, pk):
+                self.pk = pk
+
+        class FakeAccessToken(dict):
+            def __str__(self):
+                return "fake.jwt.token"
+
+        mock_user = DummyUser(real_user.pk)
+
+        validated = {
+            "user": mock_user, "permissions": {}, "permission_details": {},
+            "column_permissions": {}, "user_type": "platform", "profile_object": None,
+            "company_unique_id": None, "staffusertype_id": None,
+            "contractorusertype_id": None, "projects": [],
+        }
+
+        mock_token = FakeAccessToken(iat=1_000_000, exp=1_003_600)
+
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer, \
+             patch("app.viewsets.login.login_viewset.AccessToken") as MockAT:
+            inst = MagicMock()
+            inst.is_valid.return_value = True
+            inst.validated_data = validated
+            MockSer.return_value = inst
+            MockAT.for_user.return_value = mock_token
+
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data["unique_id"] == str(real_user.pk)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STAFF — employee_id already set  (branch 93->105: skip derivation)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginStaffEmpIdBranch:
+    def test_staff_login_with_emp_id_set(self, api_client, db):
+        """Branch 93->105: employee_id is truthy → skip Staffcreation._derive_emp_id."""
+        from app.models.superadmin_masters.auth_user import User
+        user = User.objects.create_superuser(
+            username="staff_empid", password="P@ss123", unique_id="U-EMPID-01"
+        )
+        mock_profile = MagicMock()
+        mock_profile.employee_name = "Worker"
+        mock_profile.staffusertype_id = None
+        mock_profile.contractorusertype_id = None
+        mock_profile.company_id = None
+        mock_profile.staff_unique_id = "STAFF-EMP-01"
+        mock_profile.emp_id = "EMP-001"       # truthy → skips derivation
+        mock_profile.personal_details = None
+
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "staff", profile_object=mock_profile)
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data["employee_id"] == "EMP-001"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LOGIN — UNKNOWN USER TYPE fallthrough  (branches 76->105, 158->170)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginUnknownUserType:
+    def test_unknown_user_type_still_returns_200(self, api_client, db):
+        """Branches 76->105 and 158->170: user_type not in known set → fallthrough."""
+        from app.models.superadmin_masters.auth_user import User
+        user = User.objects.create_superuser(
+            username="unknown_u", password="P@ss123", unique_id="U-UNK-01"
+        )
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "unknown_type")
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data["user_type"] == "unknown_type"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# COMPANY RESOLUTION FROM PROFILE  (lines 110-117)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.django_db
+class TestLoginCompanyResolution:
+    def test_company_from_profile_object(self, api_client, db):
+        """Lines 110-117: company resolved from profile_object.company_id."""
+        from app.models.superadmin_masters.auth_user import User
+        user = User.objects.create_superuser(
+            username="comp_u", password="P@ss123", unique_id="U-COMP-01"
+        )
+        mock_company = MagicMock()
+        mock_company.name = "Test Company"
+        mock_company.unique_id = "COMP-001"
+
+        mock_profile = MagicMock()
+        mock_profile.company_id = mock_company
+        mock_profile.employee_name = "Emp"
+        mock_profile.staffusertype_id = None
+        mock_profile.contractorusertype_id = None
+        mock_profile.staff_unique_id = None
+        mock_profile.emp_id = None
+        mock_profile.personal_details = None
+
+        with patch("app.viewsets.login.login_viewset.LoginSerializer") as MockSer:
+            MockSer.return_value = _mock_serializer(user, "staff", profile_object=mock_profile)
+            resp = api_client.post(LOGIN_BASE, {"username": "x", "password": "y"}, format="json")
+        assert resp.status_code == 200
+        assert resp.data["company_name"] == "Test Company"
+        assert resp.data["company_unique_id"] == "COMP-001"
+

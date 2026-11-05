@@ -1,0 +1,539 @@
+"""Supervisor / staff complaint ticket API.
+
+Ported from the government backend's `ticket_viewset.py`
+(`ComplaintTicketViewSet`). Scoping follows this project's model:
+Company/Project tenancy (via `CompanyScopedViewSet`) plus Zone/Ward instead
+of government's District + five-local-body hierarchy. Assignment
+notifications go through this project's `staff_notification_service`
+(in-app only — no push-to-citizen-device yet).
+"""
+
+import datetime
+
+from django.contrib.auth import get_user_model
+from django.db import models, transaction
+from django.utils import timezone
+from rest_framework import filters, status as http_status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+from app.models.core_modules.complaint_management import (
+    ComplaintAttachment,
+    ComplaintComment,
+    ComplaintFeedback,
+    ComplaintPriority,
+    ComplaintReopenHistory,
+    ComplaintStatus,
+    ComplaintStatusHistory,
+    ComplaintTicket,
+)
+from app.serializers.core_modules.complaint_management.ticket_serializers import (
+    ComplaintAttachmentSerializer,
+    ComplaintCommentSerializer,
+    ComplaintFeedbackSerializer,
+    ComplaintTicketDetailSerializer,
+    ComplaintTicketSerializer,
+)
+from app.services.complaint_ticket_routing import (
+    CLOSED_STATUS_CODES,
+    apply_routing_and_sla,
+    perform_escalation,
+)
+from app.utils.audit_mixin import AuditViewSetMixin
+from app.utils.bulk_upload_mixin import BulkUploadMixin
+from app.utils.pagination import LimitOffsetWithPage
+from app.viewsets.superadmin_masters.company_scoped_viewset import CompanyScopedViewSet
+
+User = get_user_model()
+
+
+def _actor_user(request):
+    """Return the request user only if it is an auth User.
+
+    Staff log in as `StaffcreationOfficeDetails` (not the auth User model),
+    so the history models' *_by_user FKs (-> AUTH_USER_MODEL) must be left
+    null for staff actors.
+    """
+    user = getattr(request, "user", None)
+    return user if isinstance(user, User) else None
+
+
+def _actor_user_id(request):
+    """`_actor_user`'s unique_id, for the history models' `*_by_user_id`
+    CharFields (they hold the id, not an FK)."""
+    return getattr(_actor_user(request), "unique_id", None)
+
+
+def _actor_staff_id(request):
+    """The logged-in staff member's id, for the history models'
+    `*_by_staff_id` columns — None when the actor is an auth User."""
+    user = getattr(request, "user", None)
+    if user is None or isinstance(user, User):
+        return None
+    return getattr(user, "staff_unique_id", None)
+
+
+def _resolve_status(status_code):
+    return ComplaintStatus.objects.filter(status_code=status_code, is_deleted=False).first()
+
+
+# The ticket's master references (status_id, source_id, customer_id, ...) are
+# plain CharFields holding the master's unique_id, not ForeignKeys, so they
+# can't be traversed with `status__status_code`-style lookups. These helpers
+# resolve codes to ids first and filter on the id column instead.
+def _status_q(*codes):
+    ids = list(ComplaintStatus.objects.filter(status_code__in=codes).values_list("unique_id", flat=True))
+    return models.Q(status_id__in=ids)
+
+
+def _status_bucket_q(bucket):
+    if bucket == "pending":
+        return _status_q("SUBMITTED", "ASSIGNED")
+    if bucket == "started":
+        return _status_q("IN_PROGRESS")
+    if bucket == "escalated":
+        return _status_q("ESCALATED")
+    if bucket == "resolved":
+        return _status_q(*CLOSED_STATUS_CODES)
+    if bucket == "open":
+        return ~_status_q(*CLOSED_STATUS_CODES)
+    return models.Q()
+
+
+class _TicketSearchFilter(filters.SearchFilter):
+    """SearchFilter that also matches the customer's name. `customer_id` is
+    not a ForeignKey, so `customer__customer_name` can't be listed in
+    search_fields; matching customers are resolved to ids per term instead.
+    Same semantics as SearchFilter: every term must match some field."""
+
+    def filter_queryset(self, request, queryset, view):
+        from app.models.masters.customer_masters.customercreation import CustomerCreation
+
+        terms = self.get_search_terms(request)
+        if not terms:
+            return queryset
+        for term in terms:
+            q = models.Q(
+                customer_id__in=CustomerCreation.objects.filter(
+                    customer_name__icontains=term
+                ).values("unique_id")
+            )
+            for field in getattr(view, "search_fields", ()):
+                q |= models.Q(**{f"{field}__icontains": term})
+            queryset = queryset.filter(q)
+        return queryset
+
+
+def _is_platform_superuser(user):
+    return bool(getattr(user, "is_superuser", False) and getattr(user, "company_id", None) is None)
+
+
+def _is_entry_level_staff(user):
+    """Whether `user` holds their project's *effective* entry hierarchy
+    level — the level tickets are actually first assigned to, once SLA
+    rules have disabled lower levels (e.g. Driver/Operator) as configured
+    through the SLA Rule screen's Escalation Levels. That person sees every
+    ticket in their geo scope (see `_entry_level_ticket_scope`); everyone at
+    a higher level (Project Admin, Company Admin, ...) only sees tickets
+    that have actually escalated up to them.
+
+    The entry level is the lowest escalation-enabled level of the project's
+    `ProjectStaffHierarchy` (Driver/Operator rows can be switched off so
+    tickets start at Supervisor) — the same level `apply_routing_and_sla`
+    assigns new tickets to.
+
+    A staff record with no `staffusertype_id`/`project_id`, or a project
+    with no `ProjectStaffHierarchy` at all, is treated as entry-level (fails
+    open to "sees everything in their scope") so a deployment that hasn't
+    configured a hierarchy yet keeps working as before rather than hiding
+    tickets from everyone.
+    """
+    from app.models.superadmin.role_management.projectStaffHierarchy import ProjectStaffHierarchy
+    from app.services.complaint_ticket_routing import escalation_levels
+
+    staffusertype_id = getattr(user, "staffusertype_id", None)
+    project_id = getattr(user, "project_id", None)
+    if not staffusertype_id or not project_id:
+        return True
+
+    hierarchy_levels = dict(
+        ProjectStaffHierarchy.objects.filter(
+            project_id=project_id, is_deleted=False,
+        ).values_list("staffusertype_id", "level")
+    )
+    if not hierarchy_levels:
+        return True
+
+    own_level = hierarchy_levels.get(staffusertype_id)
+    if own_level is None:
+        return True
+
+    enabled_levels = escalation_levels(project_id)
+    if not enabled_levels:
+        # Every level has escalation switched off — fall back to the raw
+        # hierarchy's lowest level.
+        entry_level = min(hierarchy_levels.values())
+    else:
+        entry_level = enabled_levels[0]
+
+    return own_level == entry_level
+
+
+def _entry_level_ticket_scope(user):
+    """Geo scope for an entry-level staff member's "sees every ticket"
+    view — narrowed to their `StaffAccessConfiguration` zone/panchayat/ward
+    grants using the same "narrowest non-empty grant wins, empty means
+    unrestricted at that level" rule as escalation routing (see
+    `complaint_ticket_routing._staff_geo_matches`). A staff member with no
+    access configuration, or none of the three grants populated, is
+    unrestricted — they see every ticket in their company/project.
+    """
+    from app.models.superadmin.staff_management.staff_access_configuration import StaffAccessConfiguration
+
+    access_config = StaffAccessConfiguration.objects.filter(
+        staff_id=user.staff_unique_id, is_active=True, is_deleted=False,
+    ).first()
+    if not access_config:
+        return models.Q()
+
+    wards = access_config.get_ward_ids()
+    if wards:
+        return models.Q(ward_id__in=wards)
+
+    panchayats = access_config.get_panchayat_ids()
+    if panchayats:
+        return models.Q(panchayat_id__in=panchayats)
+
+    zones = access_config.get_zone_ids()
+    if zones:
+        return models.Q(zone_id__in=zones)
+
+    return models.Q()
+
+
+class ComplaintTicketViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScopedViewSet):
+    serializer_class = ComplaintTicketSerializer
+    lookup_field = "unique_id"
+    filter_backends = [_TicketSearchFilter, filters.OrderingFilter]
+    pagination_class = LimitOffsetWithPage
+    search_fields = ["ticket_no", "wa_phone", "profile_name", "title", "description"]
+    ordering_fields = ["created", "updated", "next_escalation_due_at", "ticket_no"]
+    AUDIT_MODULE = "complaint-ticket"
+    AUDIT_ENDPOINT = "tickets"
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return ComplaintTicketDetailSerializer
+        return ComplaintTicketSerializer
+
+    def get_queryset(self):
+        qs = ComplaintTicket.objects.filter(is_deleted=False).order_by("-created")
+        params = self.request.query_params
+
+        if self.action in ("list", "counts"):
+            customer = params.get("customer") or params.get("customer_id")
+            if customer:
+                qs = qs.filter(customer_id=customer)
+            wa_phone = params.get("wa_phone")
+            if wa_phone:
+                qs = qs.filter(wa_phone=wa_phone)
+            state = params.get("state")
+            if state:
+                qs = qs.filter(state_id=state)
+            district = params.get("district")
+            if district:
+                qs = qs.filter(district_id=district)
+            # The Desk offers a panchayat dropdown; without this the selection
+            # was accepted and silently ignored, so the list never narrowed.
+            panchayat = params.get("panchayat")
+            if panchayat:
+                qs = qs.filter(panchayat_id=panchayat)
+            zone = params.get("zone")
+            if zone:
+                qs = qs.filter(zone_id=zone)
+            ward = params.get("ward")
+            if ward:
+                qs = qs.filter(ward_id=ward)
+            assigned_staff = params.get("assigned_staff")
+            if assigned_staff:
+                qs = qs.filter(assigned_staff_id=assigned_staff)
+            escalated = params.get("escalated")
+            if escalated in ("1", "true", "True"):
+                qs = qs.filter(is_escalated=True)
+            # Filter to one specific ComplaintSource id.
+            source = (params.get("source") or "").strip()
+            if source:
+                qs = qs.filter(source_id=source)
+
+            # Comma-separated priority codes, e.g. ?priority=P1,P2.
+            priority_codes = [c.strip() for c in (params.get("priority") or "").split(",") if c.strip()]
+            if priority_codes:
+                qs = qs.filter(
+                    # list(): ComplaintPriority is in the master DB, so it
+                    # can't be a subquery of this company-DB query.
+                    priority_id__in=list(ComplaintPriority.objects.filter(
+                        priority_code__in=priority_codes
+                    ).values_list("unique_id", flat=True))
+                )
+            # ?created_on=today or YYYY-MM-DD, as a local-day range. Not
+            # `created__date`: on MySQL that needs the server's tz tables
+            # loaded and silently matches nothing without them.
+            created_on = (params.get("created_on") or "").strip()
+            if created_on:
+                try:
+                    day = (
+                        timezone.localdate()
+                        if created_on == "today"
+                        else datetime.date.fromisoformat(created_on)
+                    )
+                    start = timezone.make_aware(datetime.datetime.combine(day, datetime.time.min))
+                    qs = qs.filter(created__gte=start, created__lt=start + datetime.timedelta(days=1))
+                except ValueError:
+                    pass
+
+            status_code = params.get("status")
+            if status_code:
+                normalized = status_code.strip().lower()
+                bucket = {
+                    "in_progress": "started",
+                    "progressing": "started",
+                    "processing": "started",
+                    "new": "pending",
+                }.get(normalized, normalized)
+                q = _status_bucket_q(bucket)
+                if q:
+                    qs = qs.filter(q)
+                else:
+                    qs = qs.filter(_status_q(status_code))
+
+        # Per-staff scoping, by hierarchy level rather than role name:
+        #   - A platform superuser sees everything.
+        #   - The entry-level staff for their project (typically Supervisor —
+        #     see `_is_entry_level_staff`) sees every ticket in their geo
+        #     scope (their StaffAccessConfiguration zone/panchayat/ward
+        #     grants, or everything in their company/project if unrestricted).
+        #   - Everyone above entry level (Project Admin, Company Admin, ...)
+        #     only sees tickets currently escalated to them — they aren't
+        #     involved until a breach actually escalates a ticket their way.
+        user = getattr(self.request, "user", None)
+        is_staff_record = hasattr(user, "staff_unique_id")
+        wants_all = params.get("all") in ("1", "true", "True")
+        if is_staff_record and not wants_all and not _is_platform_superuser(user):
+            if _is_entry_level_staff(user):
+                qs = qs.filter(_entry_level_ticket_scope(user))
+            else:
+                qs = qs.filter(escalated_to_staff_id=user.staff_unique_id)
+        return qs
+
+    @action(detail=False, methods=["get"], url_path="counts")
+    def counts(self, request):
+        qs = self.filter_queryset(self.get_queryset())
+        return Response({"all": qs.count()})
+
+    def perform_create(self, serializer):
+        super().perform_create(serializer)  # tenancy + audit (CompanyScopedViewSet)
+        ticket = serializer.instance
+        apply_routing_and_sla(ticket, save=True)
+        ComplaintStatusHistory.objects.create(
+            ticket_id=ticket.unique_id,
+            from_status_id=None,
+            to_status_id=ticket.status_id,
+            changed_by_user_id=_actor_user_id(self.request),
+            changed_by_staff_id=_actor_staff_id(self.request),
+            changed_by_system=True,
+            remarks="Ticket created",
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return Response({"message": "Ticket deleted successfully"}, status=http_status.HTTP_200_OK)
+
+    def _finalize_and_backfill(self, ticket):
+        """Call after a ticket's status is saved as one of the closed codes.
+
+        Clears any escalation flag — a closed ticket has nothing left to
+        escalate.
+        """
+        if ticket.is_escalated:
+            ticket.is_escalated = False
+            ticket.escalated_to_staff_id = None
+            ticket.save(update_fields=["is_escalated", "escalated_to_staff_id"])
+
+    # ---- PATCH/POST /tickets/{id}/status/ ----
+    @action(detail=True, methods=["patch", "post"], url_path="status")
+    @transaction.atomic
+    def change_status(self, request, unique_id=None):
+        ticket = self.get_object()
+        status_code = request.data.get("status_code") or request.data.get("to_status_code")
+        if not status_code:
+            return Response({"status_code": "This field is required."}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        new_status = _resolve_status(status_code)
+        if not new_status:
+            return Response({"status_code": f"Unknown status '{status_code}'."}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        old_status_id = ticket.status_id
+        ticket.status_id = new_status.unique_id
+        if new_status.status_code == "RESOLVED" and not ticket.resolved_at:
+            ticket.resolved_at = timezone.now()
+        if new_status.status_code == "CLOSED" and not ticket.closed_at:
+            ticket.closed_at = timezone.now()
+        ticket.save(update_fields=["status_id", "resolved_at", "closed_at"])
+
+        ComplaintStatusHistory.objects.create(
+            ticket_id=ticket.unique_id,
+            from_status_id=old_status_id,
+            to_status_id=new_status.unique_id,
+            changed_by_user_id=_actor_user_id(request),
+            changed_by_staff_id=_actor_staff_id(request),
+            remarks=request.data.get("remarks"),
+        )
+        if new_status.status_code in CLOSED_STATUS_CODES:
+            self._finalize_and_backfill(ticket)
+        return Response(self.get_serializer(ticket).data)
+
+    # ---- POST /tickets/{id}/resolve/ ----
+    @action(detail=True, methods=["post"], url_path="resolve")
+    @transaction.atomic
+    def resolve(self, request, unique_id=None):
+        ticket = self.get_object()
+        resolved_status = _resolve_status("RESOLVED")
+        if not resolved_status:
+            return Response({"detail": "RESOLVED status not configured."}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        note = request.data.get("resolution_note") or request.data.get("remarks")
+        old_status_id = ticket.status_id
+        ticket.status_id = resolved_status.unique_id
+        if not ticket.resolved_at:
+            ticket.resolved_at = timezone.now()
+        ticket.save(update_fields=["status_id", "resolved_at"])
+
+        ComplaintStatusHistory.objects.create(
+            ticket_id=ticket.unique_id,
+            from_status_id=old_status_id,
+            to_status_id=resolved_status.unique_id,
+            changed_by_user_id=_actor_user_id(request),
+            changed_by_staff_id=_actor_staff_id(request),
+            remarks=note or "Marked as resolved",
+            visible_to_citizen=True,
+        )
+        if note:
+            ComplaintComment.objects.create(
+                ticket_id=ticket.unique_id,
+                comment_by_user_id=_actor_user_id(request),
+                comment_text=note,
+                is_internal=False,
+            )
+        self._finalize_and_backfill(ticket)
+        return Response(self.get_serializer(ticket).data)
+
+    # ---- POST /tickets/{id}/escalate/ ----
+    @action(detail=True, methods=["post"], url_path="escalate")
+    @transaction.atomic
+    def escalate(self, request, unique_id=None):
+        ticket = self.get_object()
+        try:
+            perform_escalation(
+                ticket,
+                reason=request.data.get("reason"),
+                actor_user=_actor_user(request),
+                actor_staff_id=_actor_staff_id(request),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        ticket.refresh_from_db()
+        return Response(self.get_serializer(ticket).data)
+
+    # ---- POST /tickets/{id}/comments/ ----
+    @action(detail=True, methods=["post"], url_path="comments")
+    def add_comment(self, request, unique_id=None):
+        ticket = self.get_object()
+        comment = ComplaintComment.objects.create(
+            ticket_id=ticket.unique_id,
+            comment_by_user_id=_actor_user_id(request),
+            comment_text=request.data.get("comment_text", ""),
+            is_internal=bool(request.data.get("is_internal", False)),
+            is_sensitive=bool(request.data.get("is_sensitive", False)),
+        )
+        return Response(ComplaintCommentSerializer(comment).data, status=http_status.HTTP_201_CREATED)
+
+    # ---- POST /tickets/{id}/attachments/ ----
+    @action(detail=True, methods=["post"], url_path="attachments")
+    def add_attachment(self, request, unique_id=None):
+        ticket = self.get_object()
+        attachment = ComplaintAttachment.objects.create(
+            ticket_id=ticket.unique_id,
+            uploaded_by_user_id=_actor_user_id(request),
+            file=request.data.get("file"),
+            file_name=request.data.get("file_name"),
+            file_type=request.data.get("file_type"),
+            mime_type=request.data.get("mime_type"),
+        )
+        return Response(
+            ComplaintAttachmentSerializer(attachment, context={"request": request}).data,
+            status=http_status.HTTP_201_CREATED,
+        )
+
+    # ---- POST /tickets/{id}/reopen/ ----
+    @action(detail=True, methods=["post"], url_path="reopen")
+    @transaction.atomic
+    def reopen(self, request, unique_id=None):
+        ticket = self.get_object()
+        current_status = ticket.status
+        if not current_status or not current_status.allow_reopen:
+            return Response(
+                {"detail": "Current status does not allow reopen."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        # Required for audit: every reopen must say why.
+        reopen_reason = str(request.data.get("reopen_reason") or "").strip()
+        if not reopen_reason:
+            return Response(
+                {"reopen_reason": ["Please enter the reason for reopening this ticket."]},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        reopened_status = _resolve_status("REOPENED")
+        if not reopened_status:
+            return Response({"detail": "REOPENED status not configured."}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        previous_status_id = ticket.status_id
+        ticket.status_id = reopened_status.unique_id
+        ticket.reopened_count = (ticket.reopened_count or 0) + 1
+        ticket.resolved_at = None
+        ticket.closed_at = None
+        ticket.save(update_fields=["status_id", "reopened_count", "resolved_at", "closed_at"])
+
+        ComplaintReopenHistory.objects.create(
+            ticket_id=ticket.unique_id,
+            reopened_by_user_id=_actor_user_id(request),
+            reopened_by_staff_id=_actor_staff_id(request),
+            reopen_reason=reopen_reason,
+            previous_status_id=previous_status_id,
+        )
+        ComplaintStatusHistory.objects.create(
+            ticket_id=ticket.unique_id,
+            from_status_id=previous_status_id,
+            to_status_id=reopened_status.unique_id,
+            changed_by_user_id=_actor_user_id(request),
+            changed_by_staff_id=_actor_staff_id(request),
+            remarks=reopen_reason,
+        )
+        return Response(self.get_serializer(ticket).data)
+
+    # ---- POST /tickets/{id}/feedback/ ----
+    @action(detail=True, methods=["post"], url_path="feedback")
+    def submit_feedback(self, request, unique_id=None):
+        ticket = self.get_object()
+        feedback, _ = ComplaintFeedback.objects.update_or_create(
+            ticket_id=ticket.unique_id,
+            defaults={
+                "customer_id": ticket.customer_id,
+                "rating": request.data.get("rating"),
+                "feedback_text": request.data.get("feedback_text"),
+                "is_issue_solved": bool(request.data.get("is_issue_solved", False)),
+            },
+        )
+        return Response(ComplaintFeedbackSerializer(feedback).data, status=http_status.HTTP_201_CREATED)

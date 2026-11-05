@@ -1,0 +1,603 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate, useLocation} from "react-router-dom";
+import Swal from "@/lib/notify";
+import { confirmDeleteWithReason, withDeleteReason } from "@/utils/deleteReason";
+
+import { DataTable } from "@/components/common/SafeDataTable";
+import { Column } from "primereact/column";
+import { Button } from "primereact/button";
+import { FilterMatchMode } from "primereact/api";
+import type {
+  DataTablePageEvent,
+  DataTableSortEvent,
+  SortOrder,
+} from "primereact/datatable";
+import { useTranslation } from "react-i18next";
+import { FilterBar } from "@/components/common/FilterBar";
+
+import "primereact/resources/themes/lara-light-cyan/theme.css";
+import "primereact/resources/primereact.min.css";
+import "primeicons/primeicons.css";
+
+import { ActionMenu } from "@/components/ui/ActionMenu";
+import { getEncryptedRoute } from "@/utils/routeCache";
+import { appendRouteQuery, createCrudRoutePaths } from "@/utils/routePaths";
+import { userScreenPermissionApi } from "@/helpers/admin";
+import { adminApi } from "@/helpers/admin/registry";
+import { recordExcelAudit } from "@/helpers/admin/commonAudit";
+import {
+  excelFileToCsvFile,
+  exportTemplateToExcel,
+  getAdminScreenExcelFilename,
+  readExcelRows,
+  type ExcelTemplateColumn,
+} from "@/utils/exportExcel";
+import BulkUploadResultDialog from "@/components/common/BulkUploadResultDialog";
+import BulkRejectedPanel from "@/components/common/BulkRejectedPanel";
+import {
+  clearBulkResult,
+  loadBulkResult,
+  normalizeBulkErrors,
+  saveBulkResult,
+  type BulkUploadResult,
+} from "@/utils/bulkUpload";
+import { runBulkUpload } from "@/utils/backgroundJobs";
+
+import type { ProjectPermissionSummaryRow } from "./types";
+
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
+import { combineFilters } from "@/components/filters/useOptionFilter";
+import { Can } from "@/contexts/ScreenPermissionContext";
+import { useScreenAccess } from "@/contexts/screenPermission";
+
+/* -----------------------------------------------------------
+   CONSTANTS
+----------------------------------------------------------- */
+
+const PERMISSION_SEARCH_FIELDS = ["project_name", "company_name", "permission_type_label"];
+
+// NOTE: `header` must stay identical to what the backend's bulk-upload CSV
+// reader looks up in `row.get(...)` — there is no header-to-field remapping
+// like SafeDataTable's generic import path has. company_id/project_id were
+// renamed to company_name/project_name here (and in the backend's
+// bulk_upload row lookups) so the template never shows the raw id column;
+// the backend still accepts a unique_id typed into the same column.
+const BULK_TEMPLATE_COLUMNS: ExcelTemplateColumn[] = [
+  {
+    field: "company_name",
+    header: "company_name",
+    required: true,
+    sample: "Acme Corp",
+    notes: "Enter the company name as shown in Company master (e.g. Acme Corp).",
+  },
+  {
+    field: "project_name",
+    header: "project_name",
+    sample: "Chennai Waste Management (leave blank for company-wide)",
+    notes: "Enter the project name as shown in Project master, scoped to the selected company. Leave blank for a company-wide permission.",
+  },
+  { field: "permission_type", header: "permission_type", sample: "screen" },
+  {
+    field: "main_screen_name",
+    header: "main_screen_name",
+    required: true,
+    sample: "Transport Masters",
+    notes: "Enter the main screen name as shown in the screen list (e.g. Transport Masters).",
+  },
+  {
+    field: "user_screen_name",
+    header: "user_screen_name",
+    required: true,
+    sample: "Vehicle Creation",
+    notes: "Enter the screen name as shown under the selected main screen (e.g. Vehicle Creation).",
+  },
+  {
+    field: "action_name",
+    header: "action_name",
+    required: true,
+    sample: "view",
+    notes: "Enter the action name as shown for the selected screen (e.g. view, edit, delete).",
+  },
+  { field: "description", header: "description", sample: "" },
+];
+
+const BULK_KEY = "user-screen-permissions";
+
+const toStrId = (value: unknown): string => {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+};
+
+type ProjectSummaryResponse = {
+  results?: ProjectPermissionSummaryRow[];
+  count?: number;
+};
+
+const unwrapSummaryRows = (
+  response: ProjectSummaryResponse | ProjectPermissionSummaryRow[],
+): ProjectPermissionSummaryRow[] => {
+  if (Array.isArray(response)) return response;
+  return Array.isArray(response?.results) ? response.results : [];
+};
+
+/* -----------------------------------------------------------
+   COMPONENT
+----------------------------------------------------------- */
+
+export default function UserScreenPermissionList() {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+
+  const [globalFilterValue, setGlobalFilterValue] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const { canAdd, canImport } = useScreenAccess();
+  const [uploadResult, setUploadResult] = useState<BulkUploadResult | null>(() =>
+    loadBulkResult(BULK_KEY),
+  );
+  const [resultOpen, setResultOpen] = useState(false);
+
+  const location = useLocation();
+  const restoredState = location.state as { companyUniqueId?: string; projectId?: string } | null;
+  const companyProject = useCompanyProjectFilter(() => setFirst(0), {
+    initialCompanyId: restoredState?.companyUniqueId,
+    initialProjectId: restoredState?.projectId,
+  });
+  const { companyId: companyUniqueId, projectId } = companyProject;
+  const { isSuperAdmin } = companyProject.selection;
+  const [records, setRecords] = useState<ProjectPermissionSummaryRow[]>([]);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
+  const [refetchTrigger, setRefetchTrigger] = useState(0);
+  const [first, setFirst] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [sortField, setSortField] = useState<string | undefined>(undefined);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(undefined);
+
+  const [filters, setFilters] = useState<any>({
+    global: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    company_name: {
+      value: null,
+      matchMode: FilterMatchMode.STARTS_WITH,
+    },
+    project_name: {
+      value: null,
+      matchMode: FilterMatchMode.STARTS_WITH,
+    },
+  });
+
+
+  const { encAdmins, encUserScreenPermission } = getEncryptedRoute();
+  const { newPath: permissionNewPath, editPath: permissionEditPath } =
+    createCrudRoutePaths(encAdmins, encUserScreenPermission);
+  const ENC_NEW_PATH = appendRouteQuery(permissionNewPath, {
+    company_unique_id: companyUniqueId,
+  });
+
+  const ENC_EDIT_PATH = (
+    projectIdValue: string,
+    companyId: string,
+    permissionType: string
+  ) =>
+    appendRouteQuery(permissionEditPath(projectIdValue), {
+      company_unique_id: companyId,
+      permission_type: permissionType,
+    });
+
+  useEffect(() => {
+    setFirst(0);
+  }, [companyUniqueId, projectId]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const loadPermissions = async () => {
+      if (!companyUniqueId && !isSuperAdmin) {
+        setRecords([]);
+        setTotalRecords(0);
+        return;
+      }
+
+      setIsLoading(true);
+      try {
+        const params: Record<string, string | number> = {
+          page: first / rowsPerPage + 1,
+          limit: rowsPerPage,
+        };
+        if (companyUniqueId) params.company_id = companyUniqueId;
+        if (projectId) params.project_id = projectId;
+        if (globalFilterValue) params.search = globalFilterValue;
+        if (sortField) {
+          params.ordering = `${sortOrder === -1 ? "-" : ""}${sortField}`;
+        }
+
+        const response =
+          await userScreenPermissionApi.action<ProjectSummaryResponse>(
+            "project-summary",
+            undefined,
+            { params },
+          );
+        if (!mounted) return;
+
+        const rows = unwrapSummaryRows(response);
+        setRecords(rows);
+        setTotalRecords(
+          !Array.isArray(response) && typeof response?.count === "number"
+            ? response.count
+            : rows.length,
+        );
+      } catch {
+        if (mounted) Swal.fire(t("common.error"), t("common.load_failed"), "error");
+      } finally {
+        if (mounted) setIsLoading(false);
+      }
+    };
+
+    void loadPermissions();
+
+    return () => {
+      mounted = false;
+    };
+  }, [
+    companyUniqueId,
+    projectId,
+    isSuperAdmin,
+    t,
+    refetchTrigger,
+    first,
+    rowsPerPage,
+    globalFilterValue,
+    sortField,
+    sortOrder,
+  ]);
+
+  const onPage = useCallback((event: DataTablePageEvent) => {
+    setFirst(event.first);
+    setRowsPerPage(event.rows);
+  }, []);
+
+  const onSort = useCallback((event: DataTableSortEvent) => {
+    setFirst(0);
+    setSortField(event.sortField);
+    setSortOrder(event.sortOrder);
+  }, []);
+
+  /* -----------------------------------------------------------
+     DELETE RECORD — loop delete-by-project per distinct mainscreen_id
+  ----------------------------------------------------------- */
+
+  const handleDelete = useCallback(async (row: ProjectPermissionSummaryRow) => {
+    const reason = await confirmDeleteWithReason({
+      text: t("admin.user_screen_permission.confirm_delete"),
+    });
+
+    if (reason === null) return;
+
+    try {
+      const targets = row.delete_targets.length > 0
+        ? row.delete_targets
+        : [{ project_id: row.project_id, permission_type: row.edit_permission_type, mainscreen_id: "" }];
+
+      await Promise.all(
+        targets.map((target) =>
+          userScreenPermissionApi.delete(
+            `delete-by-project/${target.project_id || "none"}/?mainscreen_id=${encodeURIComponent(target.mainscreen_id)}&permission_type=${encodeURIComponent(target.permission_type)}`,
+            withDeleteReason(reason)
+          )
+        )
+      );
+
+      const targetKeys = new Set(
+        targets.map((target) => `${target.project_id}__${target.permission_type}`)
+      );
+
+      setRecords((current) =>
+        current.filter((item) => {
+          const itemKey = `${toStrId(item.project_id)}__${item.edit_permission_type}`;
+          return !targetKeys.has(itemKey);
+        }),
+      );
+      setRefetchTrigger((prev) => prev + 1);
+
+      Swal.fire(
+        t("common.deleted_success"),
+        t("admin.user_screen_permission.delete_success"),
+        "success"
+      );
+
+    } catch (error) {
+      console.error("DELETE ERROR:", error);
+
+      Swal.fire(
+        t("common.error"),
+        t("admin.user_screen_permission.delete_failed"),
+        "error"
+      );
+    }
+  }, [t]);
+
+  /* -----------------------------------------------------------
+     BULK UPLOAD — Download Template / Upload Excel
+  ----------------------------------------------------------- */
+
+  const downloadTemplate = async () => {
+    await exportTemplateToExcel(
+      BULK_TEMPLATE_COLUMNS,
+      getAdminScreenExcelFilename("template"),
+      "ScreenPermissions",
+    );
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const originalRows = (await readExcelRows(file)) as Record<string, unknown>[];
+      const csvFile = await excelFileToCsvFile(file, "screen_permission_bulk_upload.csv");
+      const formData = new FormData();
+      formData.append("file", csvFile);
+
+      const res = await runBulkUpload(
+        adminApi.companyWiseScreenPermissions,
+        formData,
+      );
+
+      const errors = normalizeBulkErrors(res.errors, originalRows);
+      const successCount = Number(res.success_count ?? 0);
+      recordExcelAudit("upload_excel", {
+        file_name: file.name,
+        status: "completed",
+        success_count: successCount,
+        error_count: errors.length,
+      });
+
+      const uploadSummary: BulkUploadResult = {
+        fileName: file.name,
+        successCount,
+        errors,
+        originalRows,
+      };
+      if (errors.length > 0) saveBulkResult(BULK_KEY, uploadSummary);
+      else clearBulkResult(BULK_KEY);
+      setUploadResult(uploadSummary);
+      setResultOpen(true);
+
+      Swal.fire({
+        icon: errors.length > 0 ? "warning" : "success",
+        title: t("admin.user_screen_permission.upload_completed_title"),
+        text: `Success: ${successCount} · Rejected: ${errors.length}. ${
+          errors.length > 0 ? "See rejected list below." : ""
+        }`,
+      });
+
+      setRefetchTrigger((prev) => prev + 1);
+    } catch (err) {
+      console.error("Screen permission bulk upload failed:", err);
+      recordExcelAudit("upload_excel", {
+        file_name: file.name,
+        status: "failed",
+      });
+      Swal.fire(t("common.error"), t("admin.user_screen_permission.upload_failed"), "error");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  /* -----------------------------------------------------------
+     ACTION BUTTONS
+  ----------------------------------------------------------- */
+
+  const actionTemplate = (row: ProjectPermissionSummaryRow) => (
+    <div className="flex justify-center">
+      <ActionMenu
+        onEdit={() => {
+          const routeProjectId = row.project_id || "none";
+          navigate(
+            ENC_EDIT_PATH(routeProjectId, row.company_id, row.edit_permission_type),
+            { state: { companyUniqueId: row.company_id, projectId: row.project_id } }
+          );
+        }}
+        onDelete={() => void handleDelete(row)}
+      />
+    </div>
+  );
+
+  const indexTemplate = (_: any, { rowIndex }: any) => first + rowIndex + 1;
+
+  const mainScreenCountTemplate = (row: ProjectPermissionSummaryRow) =>
+    t("admin.user_screen_permission.main_screens_count", { count: row.main_screen_count });
+
+  const screenCountTemplate = (row: ProjectPermissionSummaryRow) =>
+    t("admin.user_screen_permission.screens_count", { count: row.screen_count });
+
+  /* -----------------------------------------------------------
+     GLOBAL SEARCH
+  ----------------------------------------------------------- */
+
+  const onGlobalFilterChange = (e: any) => {
+    const value = e.target.value;
+    const updated = { ...filters };
+    updated["global"].value = value;
+    setFilters(updated);
+    setFirst(0);
+    setGlobalFilterValue(value);
+  };
+
+  const header = (
+    <FilterBar
+      searchValue={globalFilterValue}
+      onSearchChange={(value) => onGlobalFilterChange({ target: { value } })}
+      searchPlaceholder={t("common.search_placeholder")}
+    />
+  );
+
+  const loadAllExportRows = async () => {
+    try {
+      const params: Record<string, string | number> = {
+        page: 1,
+        limit: 100000,
+      };
+      if (companyUniqueId) params.company_id = companyUniqueId;
+      if (projectId) params.project_id = projectId;
+      if (globalFilterValue) params.search = globalFilterValue;
+      if (sortField) {
+        params.ordering = `${sortOrder === -1 ? "-" : ""}${sortField}`;
+      }
+
+      const response =
+        await userScreenPermissionApi.action<ProjectSummaryResponse>(
+          "project-summary",
+          undefined,
+          { params },
+        );
+      return unwrapSummaryRows(response) as unknown as Record<string, unknown>[];
+    } catch {
+      Swal.fire(t("common.error"), t("common.load_failed"), "error");
+    }
+    return [];
+  };
+
+  /* -----------------------------------------------------------
+     RENDER
+  ----------------------------------------------------------- */
+
+  return (
+    <div className="p-3">
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-3 mb-4">
+        <div className="min-w-0 flex-1">
+          <h1 className="text-2xl font-semibold text-gray-800">
+            {t("admin.user_screen_permission.title")}
+          </h1>
+          <p className="text-sm text-gray-500">
+            {t("admin.user_screen_permission.subtitle")}
+          </p>
+        </div>
+
+        <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            hidden
+            onChange={handleFileUpload}
+          />
+
+          <Can action="add">
+            <Button
+              label={t("common.add_item", {
+                item: t("admin.user_screen_permission.permission_label"),
+              })}
+              icon="pi pi-plus"
+              className="p-button-success"
+              onClick={() => navigate(ENC_NEW_PATH, { state: { companyUniqueId, projectId } })}
+            />
+          </Can>
+        </div>
+      </div>
+
+      {uploadResult && uploadResult.errors.length > 0 && (
+        <BulkRejectedPanel
+          result={uploadResult}
+          onClear={() => {
+            clearBulkResult(BULK_KEY);
+            setUploadResult(null);
+          }}
+          onReupload={
+            canAdd && canImport ? () => fileInputRef.current?.click() : undefined
+          }
+          onViewAll={() => setResultOpen(true)}
+          downloadFilename="screen_permission_rejected.xlsx"
+        />
+      )}
+
+      <DataTable
+        value={records}
+        loadExportRows={loadAllExportRows}
+        // This page ships its own Download Template / Upload Excel (in the
+        // Documents menu): the template uses BULK_TEMPLATE_COLUMNS and the
+        // upload posts CSV to the dedicated bulk-upload endpoint. Opt out of
+        // the generic pair so they are not offered twice.
+        bulkImportable={false}
+        documentActions={{
+          downloadTemplate: { onClick: () => void downloadTemplate() },
+          uploadExcel: { onClick: () => fileInputRef.current?.click() },
+        }}
+        dataKey="composite_key"
+        lazy
+        paginator
+        first={first}
+        rows={rowsPerPage}
+        totalRecords={totalRecords}
+        onPage={onPage}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        onSort={onSort}
+        loading={isLoading}
+        filters={filters}
+        rowsPerPageOptions={[5, 10, 25, 50]}
+        globalFilterFields={PERMISSION_SEARCH_FIELDS}
+        header={header}
+        filterPanel={combineFilters(companyProject)}
+        stripedRows
+        showGridlines
+        emptyMessage={t("common.no_items_found", {
+          item: t("admin.user_screen_permission.permission_label"),
+        })}
+        className="p-datatable-sm"
+      >
+        <Column
+          header={t("common.s_no")}
+          body={indexTemplate}
+          style={{ width: 80 }}
+        />
+
+        <Column
+          field="project_name"
+          header={t("admin.nav.project")}
+          sortable
+        />
+
+        <Column
+          field="company_name"
+          header={t("admin.nav.company")}
+          sortable
+        />
+
+        <Column
+          field="permission_type_label"
+          header="Permission Type"
+          sortable
+        />
+
+        <Column
+          header={t("admin.nav.main_screen")}
+          body={mainScreenCountTemplate}
+          sortable
+          sortField="main_screen_count"
+        />
+
+        <Column
+          header={t("admin.nav.user_screen")}
+          body={screenCountTemplate}
+          sortable
+          sortField="screen_count"
+        />
+
+        <Column
+          header={t("common.actions")}
+          body={actionTemplate}
+          style={{ width: 150 }}
+        />
+      </DataTable>
+
+      <BulkUploadResultDialog
+        visible={resultOpen}
+        onClose={() => setResultOpen(false)}
+        title="Screen permission bulk upload — rejected records"
+        result={uploadResult}
+        downloadFilename="screen_permission_rejected.xlsx"
+      />
+    </div>
+  );
+}

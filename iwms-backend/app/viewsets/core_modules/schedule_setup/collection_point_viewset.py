@@ -1,0 +1,81 @@
+from django.db import models
+from rest_framework import filters, viewsets, status
+from app.models.core_modules.schedule_setup.collection_point import Collection_point
+from app.serializers.core_modules.schedule_setup.collection_point_serializer import CollectionPointSerializer
+from rest_framework.response import Response
+from rest_framework.decorators import action
+from app.viewsets.superadmin_masters.company_scoped_viewset import CompanyScopedViewSet
+from app.utils.audit_mixin import AuditViewSetMixin
+from app.utils.pagination import LimitOffsetWithPage
+from app.utils.bulk_upload_mixin import BulkUploadMixin
+
+
+class CollectionPointViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScopedViewSet):
+    serializer_class = CollectionPointSerializer
+    lookup_field = "unique_id"
+
+    permission_resource = "CollectionPoint"
+
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    pagination_class = LimitOffsetWithPage
+    search_fields = ["cp_name"]
+    ordering_fields = ["cp_name", "collection_type", "is_active"]
+
+    AUDIT_MODULE = "assets"
+    AUDIT_ENDPOINT = "collection-point"
+
+    def get_queryset(self):
+        queryset = Collection_point.objects.filter(is_deleted=False)
+
+        company_uid = self.request.query_params.get("company_id")
+        project_uid = self.request.query_params.get("project_id")
+        district_uid = self.request.query_params.get("district") or self.request.query_params.get("district_id")
+        city_uid = self.request.query_params.get("city") or self.request.query_params.get("city_id")
+        panchayat_uid = self.request.query_params.get("panchayat") or self.request.query_params.get("panchayat_id")
+        ward_uid = self.request.query_params.get("ward") or self.request.query_params.get("ward_id")
+        zone_uid = self.request.query_params.get("zone") or self.request.query_params.get("zone_id")
+        collection_type = self.request.query_params.get("collection_type")
+
+        if company_uid:
+            queryset = queryset.filter(company_id=company_uid)
+
+        if project_uid:
+            queryset = queryset.filter(project_id=project_uid)
+
+        if district_uid:
+            queryset = queryset.filter(district_id=district_uid)
+
+        if city_uid:
+            queryset = queryset.filter(city_id=city_uid)
+
+        if panchayat_uid:
+            queryset = queryset.filter(panchayat_id=panchayat_uid)
+
+        if ward_uid:
+            queryset = queryset.filter(ward_ids__contains=ward_uid)
+
+        if zone_uid:
+            from app.models.masters.ward import Ward
+
+            zone_ward_ids = Ward.objects.filter(zone_id=zone_uid).values_list("unique_id", flat=True)
+            zone_filter = models.Q()
+            for zone_ward_id in zone_ward_ids:
+                zone_filter |= models.Q(ward_ids__contains=zone_ward_id)
+            queryset = queryset.filter(zone_filter) if zone_ward_ids else queryset.none()
+
+        # Collection points expose only bin + bulk at the API boundary. The
+        # serializer blocks household on write; this filter restricts reads too.
+        if collection_type:
+            queryset = queryset.filter(collection_type=collection_type)
+
+        return queryset
+
+    @action(detail=False, methods=["get"], url_path="collection-type-choices")
+    def collection_type_choices(self, request):
+        return Response([
+            {"value": key, "label": label}
+            for key, label in Collection_point.COLLECTION_TYPE_CP_CHOICES
+        ])
+
+    def perform_destroy(self, instance):
+        instance.delete()

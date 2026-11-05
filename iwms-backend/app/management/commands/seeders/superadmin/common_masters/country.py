@@ -1,0 +1,51 @@
+# seeders/masters/country.py
+from app.management.commands.seeders.base import BaseSeeder
+from app.models.superadmin.common_masters.continent import Continent
+from app.models.superadmin.common_masters.country import Country
+
+
+class CountrySeeder(BaseSeeder):
+    name = "country"
+
+    # (country_name, continent_name)
+    COUNTRIES = [
+        ("India",       "Asia"),
+        ("China",       "Asia"),
+        ("Japan",       "Asia"),
+        ("Bangladesh",  "Asia"),
+        ("Pakistan",    "Asia"),
+        ("Sri Lanka",   "Asia"),
+        ("Nepal",       "Asia"),
+        ("Myanmar",     "Asia"),
+        ("Thailand",    "Asia"),
+        ("Vietnam",     "Asia"),
+        ("Malaysia",    "Asia"),
+        ("Indonesia",   "Asia"),
+        ("Philippines", "Asia"),
+        ("Singapore",   "Asia"),
+        ("South Korea", "Asia"),
+    ]
+
+    def run(self):
+        continent_cache = {}
+        for country_name, continent_name in self.COUNTRIES:
+            if continent_name not in continent_cache:
+                continent_cache[continent_name] = Continent.objects.get(name=continent_name)
+            uid = continent_cache[continent_name].unique_id
+            # Look up by name only: legacy rows may hold the continent *name*
+            # in continent_id (pre-fix seeder stored str(obj)); heal them to
+            # the uid instead of creating a duplicate row.
+            country, created = Country.objects.get_or_create(
+                name=country_name,
+                defaults={
+                    # CharField — must store the uid string, not the object
+                    # (str(obj) would store the continent *name*, breaking
+                    # uid-based lookups).
+                    "continent_id": uid,
+                },
+            )
+            if not created and country.continent_id != uid:
+                country.continent_id = uid
+                country.save(update_fields=["continent_id"])
+
+        self.log(f"---Countries seeded ({len(self.COUNTRIES)} records)---")

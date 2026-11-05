@@ -1,0 +1,368 @@
+"""Named login users for the Blue Planet Integrated Waste Management project.
+
+Builds one reporting chain against the department/designation masters from
+StaffRoleMastersSeeder:
+
+    aashish (driver) ─┐
+                      ├─> Mukund (Operations Supervisor) ─> Megha (Project Admin)
+    Cheren (operator)─┘
+
+The driver/operator rows already exist for this project (created by
+BluePlanetSeeder as ASHISH KASANA / CHREN SINGH), so they are matched on
+employee name and updated in place — keeping their unique_id and any trip,
+vehicle or attendance links — rather than being duplicated under a new
+username.
+"""
+
+from django.utils import timezone
+
+from app.management.commands.seeders.base import BaseSeeder, uid
+from app.models.masters.city import City
+from app.models.masters.district import District
+from app.models.masters.ward import Ward
+from app.models.masters.zone import Zone
+from app.models.superadmin.role_management.staffUserType import StaffUserType
+from app.models.superadmin.role_management.userType import UserType
+from app.models.superadmin.screen_management.companyuserscreenpermission import (
+    CompanyUserScreenPermission,
+)
+from app.models.superadmin.screen_management.mainscreen import MainScreen
+from app.models.superadmin.staff_management.department import Department
+from app.models.superadmin.staff_management.designation import Designation
+from app.models.superadmin.staff_management.staff_access_configuration import (
+    StaffAccessConfiguration,
+    StaffAccessConfigurationPermission,
+)
+
+from app.models.superadmin.staff_management.staffcreation import Staffcreation
+from app.models.superadmin_masters.company import Company
+from app.models.superadmin_masters.project import Project
+from app.utils.password_encryption import encrypt_password
+from app.utils.permission_catalog import SECTION_MODULES
+
+
+class GnoNamedStaffSeeder(BaseSeeder):
+    name = "gno-named-staff"
+
+    PROJECT_NAME = "Blue Planet Integrated Waste Management"
+
+    # Department/designation codes come from StaffRoleMastersSeeder.
+    DEPT_OPS = "OPS"
+    DEPT_TRANS = "TRANS"
+
+    DESG_SUPERVISOR = "Operations Supervisor"
+    DESG_DRIVER = "Driver"
+    DESG_OPERATOR = "Operator"
+
+    def _get_role(self, staff_type, role_name):
+        role, _ = StaffUserType.objects.get_or_create(
+            name=role_name,
+            usertype_id=staff_type.unique_id,
+            defaults={"is_active": True, "is_deleted": False},
+        )
+        return role
+
+    def _upsert(self, *, username, employee_name, password, role, department,
+                designation, staff_head, staff_head_id, match_names, base):
+        """Update the existing person if present, else create them.
+
+        `match_names` are the employee names this person may already be
+        stored under (BluePlanetSeeder uses the upper-case forms).
+        """
+        # username is unique, so claim that row first — BluePlanetSeeder
+        # seeds its own copy of these people under bp_gno_* usernames, and
+        # matching on employee name alone can pick that duplicate and then
+        # collide on the unique username.
+        staff = Staffcreation.objects.filter(username=username).first()
+        if staff is None:
+            staff = (
+                Staffcreation.objects.filter(
+                    project_id=base["project_id"],
+                    employee_name__in=match_names,
+                )
+                .exclude(username__startswith="bp_")
+                .first()
+            )
+
+        fields = {
+            **base,
+            "employee_name": employee_name,
+            "username": username,
+            "office_email": f"{username.lower()}@blueplanet.local",
+            "staffusertype_id": uid(role),
+            "department_id": uid(department),
+            "designation_id": uid(designation),
+            # Denormalised labels the list screens read.
+            "department": department.department_name if department else None,
+            "designation": designation.designation_name if designation else None,
+            "staff_head": staff_head,
+            "staff_head_id": staff_head_id,
+            "login_enabled": True,
+            "approval_status": Staffcreation.APPROVAL_APPROVED,
+            "is_active": True,
+            "is_deleted": False,
+        }
+
+        created = staff is None
+        if created:
+            staff = Staffcreation(**fields)
+        else:
+            for key, value in fields.items():
+                setattr(staff, key, value)
+
+        # Passwords are Fernet-encrypted at rest (see utils/password_encryption).
+        staff.password = encrypt_password(password)
+        staff.password_crt_date = timezone.now()
+        staff.save()
+
+        self.log(
+            f"{employee_name} [{username}] as {role.name} "
+            f"({'Created' if created else 'Updated'})"
+        )
+        return staff
+
+    def run(self):
+        project = Project.objects.filter(
+            name=self.PROJECT_NAME, is_deleted=False
+        ).first()
+        if not project:
+            self.log_error(
+                f"Project '{self.PROJECT_NAME}' not found — run BluePlanetSeeder first."
+            )
+            return
+        company = project.company_id
+
+        staff_type = UserType.objects.filter(name__iexact="staff").first()
+        if not staff_type:
+            self.log_error("UserType 'Staff' not found — run the role seeders first.")
+            return
+
+        def _dept(code):
+            return Department.objects.filter(
+                company_id=uid(company), project_id=uid(project),
+                department_code=code, is_deleted=False,
+            ).first()
+
+        def _desg(name, department):
+            return Designation.objects.filter(
+                company_id=uid(company), project_id=uid(project),
+                designation_name=name, department_id=uid(department),
+                is_deleted=False,
+            ).first()
+
+        dept_ops = _dept(self.DEPT_OPS)
+        dept_trans = _dept(self.DEPT_TRANS)
+        if not dept_ops or not dept_trans:
+            self.log_error(
+                "Departments OPS/TRANS missing — run StaffRoleMastersSeeder first."
+            )
+            return
+
+        desg_supervisor = _desg(self.DESG_SUPERVISOR, dept_ops)
+        desg_operator = _desg(self.DESG_OPERATOR, dept_ops)
+        desg_driver = _desg(self.DESG_DRIVER, dept_trans)
+        if not all([desg_supervisor, desg_operator, desg_driver]):
+            self.log_error(
+                "Designations missing — run StaffRoleMastersSeeder first."
+            )
+            return
+
+        base = {
+            "user_type_id": uid(staff_type),
+            "company_id": uid(company),
+            "project_id": uid(project),
+            "district_id": uid(District.objects.filter(project_id=uid(project), is_deleted=False).first()),
+            "city_id": uid(City.objects.filter(project_id=uid(project), is_deleted=False).first()),
+            "zone_id": uid(Zone.objects.filter(project_id=uid(project), is_deleted=False).first()),
+            "ward_id": uid(Ward.objects.filter(project_id=uid(project), is_deleted=False).first()),
+        }
+
+        # 1. Project admin — top of the chain, so no staff head of their own.
+        megha = self._upsert(
+            username="megha",
+            employee_name="Megha",
+            password="megha@123",
+            role=self._get_role(staff_type, "Company Project Admin"),
+            department=dept_ops,
+            designation=desg_supervisor,
+            staff_head=None,
+            staff_head_id=None,
+            match_names=["Megha", "MEGHA"],
+            base=base,
+        )
+
+        # 2. Supervisor — reports to the project admin, replaces Mithun.M as
+        #    the head for the field crew below.
+        mukund = self._upsert(
+            username="mukund",
+            employee_name="Mukund",
+            password="Mukund@123",
+            role=self._get_role(staff_type, "Company Supervisor"),
+            department=dept_ops,
+            designation=desg_supervisor,
+            staff_head=megha.employee_name,
+            staff_head_id=megha.staff_unique_id,
+            match_names=["Mukund", "MUKUND"],
+            base=base,
+        )
+
+        # 3. Field crew — both now head-ed by Mukund instead of Mithun.M.
+        self._upsert(
+            username="aashish",
+            employee_name="ASHISH KASANA",
+            password="Aashish@123",
+            role=self._get_role(staff_type, "Company Driver"),
+            department=dept_trans,
+            designation=desg_driver,
+            staff_head=mukund.employee_name,
+            staff_head_id=mukund.staff_unique_id,
+            match_names=["ASHISH KASANA", "Ashish Kasana", "Aashish"],
+            base=base,
+        )
+
+        self._upsert(
+            username="cheren",
+            employee_name="CHREN SINGH",
+            password="Cheren@123",
+            role=self._get_role(staff_type, "Company Operator"),
+            department=dept_ops,
+            designation=desg_operator,
+            staff_head=mukund.employee_name,
+            staff_head_id=mukund.staff_unique_id,
+            match_names=["CHREN SINGH", "Chren Singh", "Cheren"],
+            base=base,
+        )
+
+        self.log("---Named GNO staff seeded (1 project admin, 1 supervisor, 2 field staff)---")
+
+
+class MeghaProjectAdminPermissionSeeder(BaseSeeder):
+    """Grant Megha her company/project's permission catalog.
+
+    Staff authorization resolves through StaffAccessConfiguration ->
+    StaffAccessConfigurationPermission (see utils/permission_response.py
+    permission_querysets), NOT through CompanyUserScreenPermission directly —
+    the company catalog only defines what *may* be granted. As project admin
+    Megha gets every action of that catalog, mirrored one-for-one, and the
+    config is scoped to her project so column permissions narrow with it.
+
+    She is in charge of one Blue Planet project, not the platform, so from
+    the "super-admin" section she gets Staff Management only — no company or
+    project creation, screen/role management, global masters or audits.
+    """
+
+    name = "megha-project-admin-permissions"
+
+    USERNAME = "megha"
+
+    # The only "super-admin" section modules a project admin is given.
+    SUPERADMIN_MODULES = ("staff-creations",)
+
+    def run(self):
+        staff = Staffcreation.objects.filter(username=self.USERNAME).first()
+        if not staff:
+            self.log_error(
+                f"Staff '{self.USERNAME}' not found — run GnoNamedStaffSeeder first."
+            )
+            return
+
+        company = staff.company_id
+        project = staff.project_id
+        if not company or not project:
+            self.log_error(f"'{self.USERNAME}' has no company/project assigned.")
+            return
+
+        catalog = list(
+            CompanyUserScreenPermission.objects.filter(
+                company_id=uid(company),
+                project_id=uid(project),
+                is_active=True,
+                is_deleted=False,
+            )
+        )
+        excluded = set(
+            MainScreen.objects.filter(
+                mainscreen_name__in=set(SECTION_MODULES["super-admin"])
+                - set(self.SUPERADMIN_MODULES),
+            ).values_list("unique_id", flat=True)
+        )
+        catalog = [e for e in catalog if e.mainscreen_id not in excluded]
+        if not catalog:
+            company_name = getattr(staff.company, "name", company)
+            project_name = getattr(staff.project, "name", project)
+            self.log_error(
+                f"No permission catalog for {company_name}/{project_name} — "
+                "run the screen-managements seeder first."
+            )
+            return
+
+        config, created = StaffAccessConfiguration.objects.update_or_create(
+            staff_id=staff.staff_unique_id,
+            defaults={
+                "company_id": uid(company),
+                "is_active": True,
+                "is_deleted": False,
+            },
+        )
+        config.project_ids = project
+        config.save(update_fields=["project_ids"])
+        project_name = getattr(staff.project, "name", project)
+        self.log(
+            f"Access configuration for {staff.employee_name} "
+            f"({'Created' if created else 'Updated'}) -> project {project_name}"
+        )
+
+        seen = set()
+        granted = 0
+        for order, entry in enumerate(catalog, start=1):
+            key = (
+                entry.mainscreen_id,
+                entry.userscreen_id,
+                entry.userscreenaction_id,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+
+            StaffAccessConfigurationPermission.objects.update_or_create(
+                staff_access_configuration_id=config.unique_id,
+                mainscreen_id=entry.mainscreen_id,
+                userscreen_id=entry.userscreen_id,
+                userscreenaction_id=entry.userscreenaction_id,
+                defaults={
+                    "order_no": order,
+                    "is_active": True,
+                    "is_deleted": False,
+                },
+            )
+            granted += 1
+
+        # Drop grants that are no longer in the catalog (or no longer hers,
+        # like the super-admin modules above) so a re-run cannot leave Megha
+        # holding permissions she should not have.
+        # The triple has to be compared as a whole — three independent __in
+        # filters would keep any row whose columns each appear in some other
+        # valid combination.
+        stale_ids = [
+            perm.unique_id
+            for perm in StaffAccessConfigurationPermission.objects.filter(
+                staff_access_configuration_id=config.unique_id,
+            )
+            if (
+                perm.mainscreen_id,
+                perm.userscreen_id,
+                perm.userscreenaction_id,
+            ) not in seen
+        ]
+        removed = len(stale_ids)
+        if removed:
+            StaffAccessConfigurationPermission.objects.filter(
+                unique_id__in=stale_ids
+            ).delete()
+
+        screens = len({k[1] for k in seen})
+        self.log(
+            f"---Granted {granted} permissions across {screens} screens"
+            + (f" (removed {removed} stale)" if removed else "")
+            + "---"
+        )

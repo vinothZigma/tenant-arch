@@ -1,0 +1,77 @@
+from decimal import Decimal
+
+from rest_framework import serializers
+
+from app.serializers.evidence_image import EvidenceImageField
+
+
+class ValidateBinQrRequestSerializer(serializers.Serializer):
+    bin_qr = serializers.CharField(max_length=100, allow_blank=False)
+
+
+class ScanBinRequestSerializer(serializers.Serializer):
+    ACTION_COLLECT = "collect"
+    ACTION_COLLECT_LATER = "collect_later"
+    ACTION_NOT_AVAILABLE = "not_available"
+
+    ACTION_CHOICES = [
+        ACTION_COLLECT,
+        ACTION_COLLECT_LATER,
+        ACTION_NOT_AVAILABLE,
+    ]
+
+    bin_qr = serializers.CharField(max_length=100, allow_blank=False)
+    action = serializers.ChoiceField(
+        choices=ACTION_CHOICES,
+        default=ACTION_COLLECT,
+        required=False,
+    )
+    weight_kg = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+        required=False,
+        allow_null=True,
+    )
+    latitude = serializers.DecimalField(
+        max_digits=9, decimal_places=6, required=False, allow_null=True
+    )
+    longitude = serializers.DecimalField(
+        max_digits=9, decimal_places=6, required=False, allow_null=True
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    status_reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+    )
+    evidence_image = EvidenceImageField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        action = attrs.get("action") or self.ACTION_COLLECT
+        weight = attrs.get("weight_kg")
+        reason = (attrs.get("status_reason") or attrs.get("notes") or "").strip()
+
+        # weight_kg is OPTIONAL on a collect: a crew without a working scale
+        # (or on a route where the weighment happens later at the plant) still
+        # has to be able to mark the bin collected. The weight columns on both
+        # DailyTripCollectionPoint and BinCollectionEvent are nullable, and the
+        # trip totals sum `collected_weight_kg or 0`, so a null simply
+        # contributes nothing rather than breaking the rollup.
+        if action != self.ACTION_COLLECT and not reason:
+            raise serializers.ValidationError({
+                "status_reason": "status_reason is required for this action.",
+            })
+        if action == self.ACTION_NOT_AVAILABLE:
+            errors = {}
+            if not attrs.get("evidence_image"):
+                errors["evidence_image"] = "A geotagged evidence image is required."
+            if attrs.get("latitude") is None:
+                errors["latitude"] = "Capture latitude is required."
+            if attrs.get("longitude") is None:
+                errors["longitude"] = "Capture longitude is required."
+            if errors:
+                raise serializers.ValidationError(errors)
+        attrs["action"] = action
+        attrs["status_reason"] = reason or None
+        return attrs

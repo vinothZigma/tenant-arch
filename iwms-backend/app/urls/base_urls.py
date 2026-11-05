@@ -1,0 +1,604 @@
+from django.urls import include, path
+
+from .custom_router import GroupedRouter
+
+# ============================================================
+# IMPORTS
+# ============================================================
+
+# Superadmin masters
+from ..viewsets.superadmin_masters.company_management import PlatformCompanyCreateViewSet
+from ..viewsets.superadmin_masters.project_management import CompanyProjectCreateViewSet
+
+# Common masters
+from ..viewsets.superadmin.common_masters.continent_viewset import ContinentViewSet
+from ..viewsets.superadmin.common_masters.country_viewset import CountryViewSet
+from ..viewsets.superadmin.common_masters.state_viewset import StateViewSet
+
+# Masters
+from ..viewsets.masters.district_viewset import DistrictViewSet
+from ..viewsets.masters.city_viewset import CityViewSet
+from ..viewsets.masters.zone_viewset import ZoneViewSet
+from ..viewsets.masters.ward_viewset import WardViewSet
+from ..viewsets.masters.panchayat_viweset import PanhayatViewSet
+from ..viewsets.masters.leader_management.panchayat_leader_viewset import PanchayatLeaderLoginViewSet
+from ..viewsets.masters.leader_management.district_leader_viewset import DistrictLeaderLoginViewSet
+
+# Waste types (merged from the legacy "assets" group)
+from ..viewsets.masters.waste_masters.property_viewset import PropertyViewSet
+from ..viewsets.masters.waste_masters.subproperty_viewset import SubPropertyViewSet
+from ..viewsets.waste_collection_bluetooth.waste_type_viewset import WasteTypeViewSet
+from ..viewsets.masters.waste_masters.bins_viewset import BinsViewSet
+
+# Screen management
+from ..viewsets.superadmin.screen_management.mainscreentype_viewset import MainScreenTypeViewSet
+from ..viewsets.superadmin.screen_management.mainscreen_viewset import MainScreenViewSet
+from ..viewsets.superadmin.screen_management.userscreen_viewset import UserScreenViewSet
+from ..viewsets.superadmin.screen_management.userscreenaction_viewset import UserScreenActionViewSet
+from ..viewsets.superadmin.screen_management.companyuserscreenpermission_viewset import CompanyUserScreenPermissionViewSet
+from ..viewsets.superadmin.screen_management.app_module_viewset import AppModuleViewSet
+from ..viewsets.masters.customer_masters.customer_access_configuration_viewset import CustomerAccessConfigurationViewSet
+from ..viewsets.superadmin.screen_management.companyuserscreencolumnpermission_viewset import CompanyUserScreenColumnPermissionViewSet
+from ..viewsets.core_modules.excel_export_viewset import ExcelExportView
+from ..viewsets.superadmin.screen_management.permission_api_views import (
+    CompanyPermissionsAPIView,
+    PermissionAssignAPIView,
+    UserScreenColumnsAPIView,
+)
+
+# Role assignments
+from ..viewsets.superadmin.role_management.usertype_viewset import UserTypeViewSet
+from ..viewsets.superadmin.role_management.staffusertype_viewset import StaffUserTypeViewSet
+from ..viewsets.superadmin.role_management.project_staff_hierarchy_viewset import ProjectStaffHierarchyViewSet
+from ..viewsets.superadmin.role_management.contractorusertype_viewset import ContractorUserTypeViewSet
+
+# User creations
+from ..viewsets.superadmin.staff_management.department_viewset import DepartmentViewSet
+from ..viewsets.superadmin.staff_management.designation_viewset import DesignationViewSet
+from ..viewsets.superadmin.staff_management.staffcreation_viewset import StaffcreationViewset
+from ..viewsets.superadmin.staff_management.staff_access_configuration_viewset import (
+    StaffAccessConfigurationViewSet,
+)
+
+# Authentication
+from ..viewsets.login.login_viewset import LoginViewSet as DesktopLoginViewSet
+from ..viewsets.auth.forgot_password_viewset import (
+    ForgotPasswordView,
+    VerifyOTPView,
+    ResetPasswordView,
+)
+from ..viewsets.auth.change_password_viewset import (
+    ChangePasswordView,
+    AdminChangePasswordView,
+)
+
+# Customer modules
+from ..viewsets.masters.customer_masters.customercreation_viewset import CustomerCreationViewSet
+from ..viewsets.core_modules.daily_operations.wastecollection_viewset import WasteCollectionViewSet
+
+# Complaint Ticketing
+from ..viewsets.core_modules.complaint_management.main_category_viewset import MainCategoryViewSet
+from ..viewsets.core_modules.complaint_management.sub_category_viewset import SubCategoryViewSet
+from ..viewsets.core_modules.complaint_management.ticket_master_viewsets import (
+    ComplaintModuleViewSet,
+    ComplaintPriorityViewSet,
+    ComplaintStatusViewSet,
+    ComplaintSourceViewSet,
+    ComplaintLanguageViewSet,
+    ComplaintTicketCategoryViewSet,
+    ComplaintTicketSubcategoryViewSet,
+    ComplaintSlaRuleViewSet,
+    ComplaintRoutingRuleViewSet,
+)
+from ..viewsets.core_modules.complaint_management.secondary_viewsets import (
+    ComplaintFeedbackViewSet,
+    ComplaintReopenHistoryViewSet,
+)
+from ..viewsets.core_modules.complaint_management.notification_viewset import (
+    ComplaintNotificationViewSet,
+)
+from ..viewsets.core_modules.complaint_management.address_change_viewset import (
+    ComplaintAddressChangeViewSet,
+)
+from ..viewsets.core_modules.complaint_management.citizen_ticket_viewset import (
+    CitizenComplaintTicketViewSet,
+)
+from ..viewsets.core_modules.complaint_management.citizen_pickup_viewset import (
+    CitizenPickupViewSet,
+)
+from ..viewsets.core_modules.complaint_management.ticket_viewset import ComplaintTicketViewSet
+from ..viewsets.core_modules.notifications.staff_notification_viewset import StaffNotificationViewSet
+
+# Transport masters
+from ..viewsets.masters.transport_masters.vehicletypecreation_viewset import VehicleTypeCreationViewSet
+from ..viewsets.masters.transport_masters.vehicleCreation_viewset import VehicleCreationViewSet
+from ..viewsets.masters.transport_masters.fuel_viewset import FuelViewSet
+from ..viewsets.masters.plant_viewset import PlantViewSet
+
+# Schedule masters
+from ..viewsets.core_modules.schedule_setup.staff_template_viewset import StaffTemplateViewSet
+from ..viewsets.core_modules.schedule_setup.alternative_staff_template_viewset import AlternativeStaffTemplateViewSet
+from ..viewsets.core_modules.schedule_setup.collection_point_viewset import CollectionPointViewSet
+from ..viewsets.core_modules.schedule_setup.trip_plan_viewset import TripPlanViewSet
+from ..viewsets.core_modules.daily_operations.daily_trip_assignment_viewset import DailyTripAssignmentViewSet
+from ..viewsets.core_modules.daily_operations.daily_trip_collection_point_viewset import DailyTripCollectionPointViewSet
+from ..viewsets.core_modules.daily_operations.route_detour_waypoint_viewset import RouteDetourWaypointViewSet
+from ..viewsets.core_modules.schedule_setup.trip_plan_static_route_viewset import TripPlanStaticRouteViewSet
+from ..viewsets.core_modules.daily_operations.daily_trip_household_collection_viewset import DailyTripHouseholdCollectionViewSet
+from ..viewsets.core_modules.daily_operations.bin_collection_event_viewset import BinCollectionEventViewSet
+from ..viewsets.core_modules.daily_operations.daily_trip_log_viewset import DailyTripLogViewSet
+from ..viewsets.reports.waste_reports.monthly_waste_comparison_viewset import MonthlyWasteComparisonReportViewSet
+from ..viewsets.reports.waste_reports.daily_waste_comparison_viewset import DailyWasteComparisonViewSet
+from ..viewsets.reports.complaint_reports.complaints_report_viewset import ComplaintsReportViewSet
+from ..viewsets.core_modules.daily_operations.vehicle_breakdown_viewset import VehicleBreakdownViewSet
+from ..viewsets.core_modules.daily_operations.trip_delay_report_viewset import TripDelayReportViewSet
+from ..viewsets.core_modules.daily_operations.trip_retrip_viewset import TripRetripRequestViewSet
+
+# Audits
+from ..viewsets.superadmin.audits.login_audit_viewset import LoginAuditViewSet
+from ..viewsets.superadmin.audits.common_audit_viewset import CommonAuditViewSet
+from ..viewsets.superadmin.audits.permission_audit_viewset import PermissionAuditLogViewSet
+from ..viewsets.superadmin.audits.static_route_audit_viewset import StaticRouteAuditLogViewSet
+from ..viewsets.superadmin.audits.complaint_audit_viewset import ComplaintAuditViewSet
+from ..viewsets.superadmin.audits.db_change_audit_viewset import DbChangeAuditViewSet
+from ..viewsets.superadmin.audits.audit_dashboard_viewset import AuditDashboardViewSet
+
+# Palakad district admin portal
+from ..viewsets.palakad.palakad_login_viewset import PalakadLoginViewSet
+
+# Localbody
+from ..viewsets.localbody.localbody_dashboard_viewset import LocalBodyDashboardViewSet
+# District dashboard
+from ..viewsets.district.district_dashboard_viewset import DistrictDashboardViewSet
+# Company/project-scoped dashboard summary
+from ..viewsets.dashboard.dashboard_summary_viewset import DashboardSummaryViewSet
+# Admin / Superadmin dashboards (sidebar "Dashboard" and "Superadmin Dashboard")
+from ..viewsets.dashboard.admin_dashboard_viewset import AdminDashboardViewSet
+from ..viewsets.dashboard.superadmin_dashboard_viewset import SuperadminDashboardViewSet
+from ..viewsets.dashboard.vehicle_status_dashboard_viewset import VehicleStatusDashboardViewSet
+
+# Operator mobile
+from ..viewsets.operator_mobile.my_trip_today_viewset import MyTripTodayViewSet, MyTripsTodayViewSet
+from ..viewsets.operator_mobile.validate_bin_qr_viewset import ValidateBinQrViewSet
+from ..viewsets.operator_mobile.scan_bin_viewset import ScanBinViewSet
+from ..viewsets.operator_mobile.trip_history_viewset import TripHistoryViewSet
+from ..viewsets.operator_mobile.trip_lifecycle_viewset import TripLifecycleViewSet
+from ..viewsets.operator_mobile.trip_stops_viewset import TripStopsViewSet
+
+# Waste bluetooth
+from ..viewsets.waste_collection_bluetooth.waste_bluetooth_viewset import WasteCollectionBluetoothViewSet
+from ..viewsets.waste_collection_bluetooth.waste_collection_sub_viewset import WasteCollectionSubViewSet
+from ..viewsets.waste_collection_bluetooth.waste_collection_main_viewset import WasteCollectionMainViewSet
+
+# Mobile
+from ..viewsets.core_modules.attendance.register import RegisterViewSet
+from ..viewsets.core_modules.attendance.recognize import RecognizeViewSet
+from ..viewsets.core_modules.attendance.face_config_viewset import FaceConfigViewSet
+from ..viewsets.core_modules.attendance.employee_viewset import EmployeeViewSet
+from ..viewsets.core_modules.attendance.staff_profile_viewset import StaffProfileViewSet
+from ..viewsets.core_modules.attendance.attendance_records_viewset import AttendanceRecordsViewSet
+from ..viewsets.core_modules.attendance.attendance_list import AttendanceListViewSet
+from ..viewsets.core_modules.attendance.external_attendance import ExternalAttendanceViewSet
+
+
+router = GroupedRouter()
+
+# ============================================================
+# GROUP: SUPERADMIN MASTERS
+# ============================================================
+router.register_group("superadmin","company",PlatformCompanyCreateViewSet)
+router.register_group("superadmin","project",CompanyProjectCreateViewSet)
+
+# ============================================================
+# GROUP: COMMON MASTERS
+# ============================================================
+router.register_group("common-masters", "continents",    ContinentViewSet)
+router.register_group("common-masters", "countries",     CountryViewSet)
+router.register_group("common-masters", "states",        StateViewSet)
+
+# ============================================================
+# GROUP: MASTERS
+# ============================================================
+router.register_group("masters", "districts",     DistrictViewSet)
+router.register_group("masters", "cities",        CityViewSet)
+router.register_group("masters", "zones",         ZoneViewSet)
+router.register_group("masters", "wards",         WardViewSet)
+router.register_group("masters", "panchayat",         PanhayatViewSet)
+router.register_group("masters", "panchayat-leaders", PanchayatLeaderLoginViewSet)
+router.register_group("masters", "district-leaders", DistrictLeaderLoginViewSet)
+router.register_group("masters", "plants",         PlantViewSet)
+
+
+# ============================================================
+# GROUP: Waste-Types
+# ============================================================
+router.register_group("waste-types", "properties",    PropertyViewSet)
+router.register_group("waste-types", "subproperties", SubPropertyViewSet)
+router.register_group("waste-types", "wastetypes",    WasteTypeViewSet)
+router.register_group("waste-types", "bins",          BinsViewSet)
+
+# ============================================================
+# GROUP: SCREEN MANAGEMENT (separate group)
+# ============================================================
+router.register_group("screen-managements", "mainscreentype",        MainScreenTypeViewSet)
+router.register_group("screen-managements", "mainscreens",           MainScreenViewSet)
+router.register_group("screen-managements", "userscreens",           UserScreenViewSet)
+router.register_group("screen-managements", "userscreen-action",     UserScreenActionViewSet)
+router.register_group("screen-managements", "companywisescreenpermissions", CompanyUserScreenPermissionViewSet)
+router.register_group("screen-managements", "column-permissions", CompanyUserScreenColumnPermissionViewSet)
+router.register_group("screen-managements", "app-modules", AppModuleViewSet)
+
+# ============================================================
+# GROUP: USER & ROLE ASSIGNMENT 
+# ============================================================
+router.register_group("role-assigns", "user-type",           UserTypeViewSet)
+router.register_group("role-assigns", "staffusertypes",      StaffUserTypeViewSet)
+router.register_group("role-assigns", "staffusertypes",      StaffUserTypeViewSet, basename="staffusertype-roletype")
+router.register_group("role-assigns", "project-staff-hierarchy", ProjectStaffHierarchyViewSet)
+router.register_group("role-assigns", "contractorusertypes", ContractorUserTypeViewSet)
+router.register_group("role-assigns", "contractorusertypes", ContractorUserTypeViewSet, basename="contractorusertype-roletype")
+
+# ============================================================
+# GROUP: USER CREATION
+# ============================================================
+router.register_group("staff-creations", "departments",     DepartmentViewSet)
+router.register_group("staff-creations", "designations",    DesignationViewSet)
+router.register_group("staff-creations", "staffcreation",   StaffcreationViewset)
+router.register_group(
+    "staff-creations", "staff-access-configuration", StaffAccessConfigurationViewSet
+)
+
+# ============================================================
+# GROUP: AUTHENTICATION
+# ============================================================
+router.register_group("login", "login-user",      DesktopLoginViewSet)
+
+# ============================================================
+# GROUP: CUSTOMER MODULES
+# ============================================================
+router.register_group("customer-masters", "customercreations", CustomerCreationViewSet)
+router.register_group(
+    "customer-masters", "customer-access-configuration", CustomerAccessConfigurationViewSet
+)
+
+# ============================================================
+# GROUP: COMPLAINT MASTERS (SUPER ADMIN)
+#
+# Global complaint configuration. None of these tables carry a
+# company/project FK, so a single edit reconfigures every tenant — they are
+# deliberately split out of "complaint-ticket" so a company-scoped role can
+# never hold write access. See MODULE_RESOURCE_ALLOWLIST /
+# MODULE_READONLY_RESOURCES in module_permission_middleware.py.
+#
+# The "types" prefix backs the tabbed Complaint Types screen (Category /
+# Sub-category / SLA), which is why the category viewset is registered under
+# both names.
+# ============================================================
+router.register_group("complaint-masters", "types", ComplaintTicketCategoryViewSet, basename="complaint-masters-types")
+router.register_group("complaint-masters", "categories", ComplaintTicketCategoryViewSet, basename="complaint-masters-categories")
+router.register_group("complaint-masters", "subcategories", ComplaintTicketSubcategoryViewSet, basename="complaint-masters-subcategories")
+router.register_group("complaint-masters", "sla-rules", ComplaintSlaRuleViewSet, basename="complaint-masters-sla-rules")
+router.register_group("complaint-masters", "routing-rules", ComplaintRoutingRuleViewSet, basename="complaint-masters-routing-rules")
+router.register_group("complaint-masters", "modules", ComplaintModuleViewSet, basename="complaint-masters-modules")
+router.register_group("complaint-masters", "priorities", ComplaintPriorityViewSet, basename="complaint-masters-priorities")
+router.register_group("complaint-masters", "statuses", ComplaintStatusViewSet, basename="complaint-masters-statuses")
+router.register_group("complaint-masters", "sources", ComplaintSourceViewSet, basename="complaint-masters-sources")
+router.register_group("complaint-masters", "languages", ComplaintLanguageViewSet, basename="complaint-masters-languages")
+
+# ============================================================
+# GROUP: COMPLAINT TICKETING (CORE MODULES)
+#
+# Company/project-scoped complaint entries plus the teams that work them.
+# The master prefixes below stay registered here so the Complaint Desk can
+# still populate its Type/Sub-type/Priority dropdowns; the middleware
+# downgrades them to view-only for this module.
+# ============================================================
+router.register_group("complaint-ticket", "tickets", ComplaintTicketViewSet, basename="complaint-ticket-tickets")
+router.register_group("complaint-ticket", "feedback", ComplaintFeedbackViewSet, basename="complaint-ticket-feedback")
+router.register_group("complaint-ticket", "reopen-history", ComplaintReopenHistoryViewSet, basename="complaint-ticket-reopen-history")
+router.register_group("complaint-ticket", "notifications", ComplaintNotificationViewSet, basename="complaint-ticket-notifications")
+router.register_group("complaint-ticket", "address-change", ComplaintAddressChangeViewSet, basename="complaint-ticket-address-change")
+
+# Read-only master reads for the Desk's dropdowns (writes blocked by
+# MODULE_READONLY_RESOURCES). Kept at their original paths so existing
+# frontend calls and bookmarked links keep resolving.
+router.register_group("complaint-ticket", "categories", ComplaintTicketCategoryViewSet, basename="complaint-ticket-categories")
+router.register_group("complaint-ticket", "subcategories", ComplaintTicketSubcategoryViewSet, basename="complaint-ticket-subcategories")
+router.register_group("complaint-ticket", "modules", ComplaintModuleViewSet, basename="complaint-ticket-modules")
+router.register_group("complaint-ticket", "priorities", ComplaintPriorityViewSet, basename="complaint-ticket-priorities")
+router.register_group("complaint-ticket", "statuses", ComplaintStatusViewSet, basename="complaint-ticket-statuses")
+router.register_group("complaint-ticket", "sources", ComplaintSourceViewSet, basename="complaint-ticket-sources")
+router.register_group("complaint-ticket", "languages", ComplaintLanguageViewSet, basename="complaint-ticket-languages")
+router.register_group("complaint-ticket", "ticket-categories", ComplaintTicketCategoryViewSet, basename="complaint-ticket-ticket-categories")
+router.register_group("complaint-ticket", "ticket-subcategories", ComplaintTicketSubcategoryViewSet, basename="complaint-ticket-ticket-subcategories")
+router.register_group("complaint-ticket", "sla-rules", ComplaintSlaRuleViewSet, basename="complaint-ticket-sla-rules")
+router.register_group("complaint-ticket", "routing-rules", ComplaintRoutingRuleViewSet, basename="complaint-ticket-routing-rules")
+
+# Backward-compatible mobile alias used by the private app.
+router.register_group("complaint-ticket", "grievance-tickets", ComplaintTicketViewSet, basename="complaint-ticket-grievance-tickets")
+
+# ============================================================
+# GROUP: CITIZEN (self-scoped, auth-only — see AUTH_ONLY_SUFFIXES /
+# CITIZEN_PREFIXES in module_permission_middleware.py)
+# ============================================================
+router.register_group("citizen", "complaint-tickets", CitizenComplaintTicketViewSet, basename="citizen-complaint-tickets")
+router.register_group("citizen", "my-pickup-today", CitizenPickupViewSet, basename="citizen-my-pickup-today")
+
+# ============================================================
+# GROUP: STAFF NOTIFICATIONS (shared by driver/operator/supervisor apps)
+# ============================================================
+router.register_group("schedule-operations", "staff-notifications", StaffNotificationViewSet, basename="schedule-operations-staff-notifications")
+
+# ============================================================
+# GROUP: TRANSPORT MASTERS
+# ============================================================
+router.register_group("transport-masters", "vehicle-type",     VehicleTypeCreationViewSet)
+router.register_group("transport-masters", "vehicle-creation", VehicleCreationViewSet)
+router.register_group("transport-masters", "fuels",         FuelViewSet)
+
+# ============================================================
+# GROUP: SCHEDULE SETUP (split from the legacy "schedule-masters"
+# group — template/plan setup resources)
+# ============================================================
+router.register_group("schedule-setup", "staff-templates", StaffTemplateViewSet)
+router.register_group("schedule-setup", "alternative-staff-templates", AlternativeStaffTemplateViewSet)
+router.register_group("schedule-setup", "collection-points", CollectionPointViewSet)
+router.register_group("schedule-setup", "trip-plans", TripPlanViewSet)
+
+# ============================================================
+# GROUP: SCHEDULE OPERATIONS (split from the legacy "schedule-masters"
+# group — day-to-day execution resources)
+# ============================================================
+router.register_group("schedule-operations", "daily-trip-assignments", DailyTripAssignmentViewSet)
+router.register_group("schedule-operations", "daily-trip-collection-points", DailyTripCollectionPointViewSet)
+router.register_group("schedule-operations", "route-detour-waypoints", RouteDetourWaypointViewSet)
+router.register_group("schedule-operations", "trip-plan-static-routes", TripPlanStaticRouteViewSet)
+router.register_group("schedule-operations", "daily-trip-household-collections", DailyTripHouseholdCollectionViewSet)
+router.register_group("schedule-operations", "bin-collection-events", BinCollectionEventViewSet)
+router.register_group("schedule-operations", "daily-trip-logs", DailyTripLogViewSet)
+router.register_group("schedule-operations", "wastecollections", WasteCollectionViewSet)
+router.register_group("schedule-operations", "vehicle-breakdowns", VehicleBreakdownViewSet)
+router.register_group("schedule-operations", "trip-delay-reports", TripDelayReportViewSet)
+router.register_group("schedule-operations", "retrip-requests", TripRetripRequestViewSet)
+
+# ============================================================
+# GROUP: REPORTS (moved out of the legacy "schedule-masters" group,
+# which no longer registers any routes)
+# ============================================================
+router.register_group("reports", "daily-waste-comparisons", DailyWasteComparisonViewSet, basename="daily-waste-comparisons")
+router.register_group("reports", "monthly-waste-comparison", MonthlyWasteComparisonReportViewSet, basename="monthly-waste-comparison")
+router.register_group("reports", "complaints-report", ComplaintsReportViewSet, basename="complaints-report")
+
+# ============================================================
+# GROUP: AUDIT
+# ============================================================
+router.register_group("audits", "login-audit", LoginAuditViewSet)
+router.register_group("audits", "common-audit", CommonAuditViewSet)
+router.register_group("audits", "permission-audit", PermissionAuditLogViewSet, basename="permission-audit")
+router.register_group("audits", "static-route-audit", StaticRouteAuditLogViewSet, basename="static-route-audit")
+router.register_group("audits", "complaint-audit", ComplaintAuditViewSet, basename="complaint-audit")
+router.register_group("audits", "db-change-audit", DbChangeAuditViewSet, basename="db-change-audit")
+router.register_group("audits", "audit-dashboard", AuditDashboardViewSet, basename="audit-dashboard")
+
+# ============================================================
+# GROUP: EXTERNAL ATTENDANCE
+# ============================================================
+router.register_group(
+    "attendance",
+    "external-records",
+    ExternalAttendanceViewSet,
+    basename="external-attendance",
+)
+
+# ============================================================
+# GROUP: PALAKAD (company admin district portal)
+# ============================================================
+router.register_group("palakad", "login-user", PalakadLoginViewSet, basename="palakad-login")
+
+# ============================================================
+# GROUP: LOCALBODY (panchayat leader portal — auth-only, no module permission check)
+# ============================================================
+router.register_group("localbody", "dashboard", LocalBodyDashboardViewSet, basename="localbody-dashboard")
+# ============================================================
+# GROUP: DISTRICT (district member portal)
+# ============================================================
+router.register_group("district", "dashboard", DistrictDashboardViewSet, basename="district-dashboard")
+
+# ============================================================
+# GROUP: DASHBOARD (company/project-scoped dashboard summary)
+# ============================================================
+router.register_group("dashboard", "summary", DashboardSummaryViewSet, basename="dashboard-summary")
+
+# ============================================================
+# GROUP: DASHBOARDS (permission-gated: dashboard/admin-dashboard screen;
+# superadmin is platform super admin only)
+# ============================================================
+router.register_group("dashboards", "admin", AdminDashboardViewSet, basename="admin-dashboard")
+router.register_group("dashboards", "superadmin", SuperadminDashboardViewSet, basename="superadmin-dashboard")
+router.register_group("dashboards", "fleet-status", VehicleStatusDashboardViewSet, basename="vehicle-status-dashboard")
+
+# ============================================================
+# GROUP: OPERATOR MOBILE
+# ============================================================
+router.register_group(
+    "operator-mobile",
+    "my-trip-today",
+    MyTripTodayViewSet,
+    basename="operator-mobile-my-trip-today",
+)
+router.register_group(
+    "operator-mobile",
+    "my-trips-today",
+    MyTripsTodayViewSet,
+    basename="operator-mobile-my-trips-today",
+)
+router.register_group(
+    "operator-mobile",
+    "validate-bin-qr",
+    ValidateBinQrViewSet,
+    basename="operator-mobile-validate-bin-qr",
+)
+router.register_group(
+    "operator-mobile",
+    "scan-bin",
+    ScanBinViewSet,
+    basename="operator-mobile-scan-bin",
+)
+router.register_group(
+    "operator-mobile",
+    "trip-history",
+    TripHistoryViewSet,
+    basename="operator-mobile-trip-history",
+)
+router.register_group(
+    "operator-mobile",
+    "trip-lifecycle",
+    TripLifecycleViewSet,
+    basename="operator-mobile-trip-lifecycle",
+)
+router.register_group(
+    "operator-mobile",
+    "trip-stops",
+    TripStopsViewSet,
+    basename="operator-mobile-trip-stops",
+)
+
+# ============================================================
+# GROUP: WASTE BLUETOOTH
+# ============================================================
+router.register_group("waste-bluetooth", "types", WasteTypeViewSet)
+router.register_group("waste-bluetooth", "collection-sub", WasteCollectionSubViewSet)
+router.register_group("waste-bluetooth", "collection-main", WasteCollectionMainViewSet)
+
+
+# ============================================================
+# GROUP: MOBILE URLS
+# ============================================================
+router.register_group(
+    "mobile",
+    "login",
+    DesktopLoginViewSet,
+    basename="mobile-login",
+    include_group_in_prefix=False,
+)
+router.register_group(
+    "mobile",
+    "main-category",
+    MainCategoryViewSet,
+    basename="mobile-main-category",
+    include_group_in_prefix=False,
+)
+router.register_group(
+    "mobile",
+    "sub-category",
+    SubCategoryViewSet,
+    basename="mobile-sub-category",
+    include_group_in_prefix=False,
+)
+router.register_group(
+    "mobile",
+    "register",
+    RegisterViewSet,
+    basename="mobile-register",
+    include_group_in_prefix=False,
+)
+router.register_group(
+    "mobile",
+    "recognize",
+    RecognizeViewSet,
+    basename="mobile-recognize",
+    include_group_in_prefix=False,
+)
+router.register_group(
+    "mobile",
+    "employee",
+    EmployeeViewSet,
+    basename="mobile-employee",
+    include_group_in_prefix=False,
+)
+router.register_group(
+    "mobile",
+    "staff-profile",
+    StaffProfileViewSet,
+    basename="mobile-staff-profile",
+    include_group_in_prefix=False,
+)
+router.register_group(
+    "mobile",
+    "waste",
+    WasteCollectionBluetoothViewSet,
+    basename="mobile-waste-collection",
+    include_group_in_prefix=False,
+)
+router.register_group(
+    "mobile",
+    "attendance-list",
+    AttendanceListViewSet,
+    basename="mobile-attendance-list",
+    include_group_in_prefix=False,
+)
+
+# App calls `attendance/daily-attendance/{today,summary}/` and
+# `attendance/staff-profile/` — same viewsets as above, registered under the
+# path the driver/operator/supervisor attendance screens actually use.
+router.register_group(
+    "attendance",
+    "daily-attendance",
+    AttendanceListViewSet,
+    basename="attendance-daily-attendance",
+)
+router.register_group(
+    "attendance",
+    "staff-profile",
+    StaffProfileViewSet,
+    basename="attendance-staff-profile",
+)
+router.register_group(
+    "attendance",
+    "register",
+    RegisterViewSet,
+    basename="attendance-register",
+)
+router.register_group(
+    "attendance",
+    "recognize",
+    RecognizeViewSet,
+    basename="attendance-recognize",
+)
+# Lets the app read the active face provider + capture rules, so switching
+# FACE_RECOGNITION_PROVIDER in .env needs no mobile release.
+router.register_group(
+    "attendance",
+    "face-config",
+    FaceConfigViewSet,
+    basename="attendance-face-config",
+)
+router.register_group(
+    "attendance",
+    "records",
+    AttendanceRecordsViewSet,
+    basename="attendance-records",
+)
+
+# ============================================================
+# URLS
+# ============================================================
+urlpatterns = [
+    # Password reset flow (public — no authentication required)
+    path("auth/forgot-password/", ForgotPasswordView.as_view(), name="auth-forgot-password"),
+    path("auth/verify-otp/", VerifyOTPView.as_view(), name="auth-verify-otp"),
+    path("auth/reset-password/", ResetPasswordView.as_view(), name="auth-reset-password"),
+    # Authenticated password change (self-service and admin)
+    path("auth/change-password/", ChangePasswordView.as_view(), name="auth-change-password"),
+    path("auth/admin-change-password/", AdminChangePasswordView.as_view(), name="auth-admin-change-password"),
+
+    path(
+        "permissions/userscreen/<str:userscreen_id>/columns/",
+        UserScreenColumnsAPIView.as_view(),
+    ),
+    path("permissions/assign/", PermissionAssignAPIView.as_view()),
+    # Server-side Excel export of any list endpoint (synchronous).
+    path("exports/excel/", ExcelExportView.as_view(), name="exports-excel"),
+    path("permissions/company/<str:company_id>/", CompanyPermissionsAPIView.as_view()),
+    path("", include(router.urls)),
+]

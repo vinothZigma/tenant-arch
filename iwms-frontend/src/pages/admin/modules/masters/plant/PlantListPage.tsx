@@ -1,0 +1,342 @@
+import type { PlantRecord } from "./types";
+import { createCrudRoutePaths } from "@/utils/routePaths";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import Swal from "@/lib/notify";
+import { confirmDeleteWithReason, withDeleteReason } from "@/utils/deleteReason";
+
+import { DataTable } from "@/components/common/SafeDataTable";
+import { Column } from "primereact/column";
+import { Button } from "primereact/button";
+import type {
+  DataTablePageEvent,
+  DataTableSortEvent,
+  SortOrder,
+} from "primereact/datatable";
+
+import { ActionMenu } from "@/components/ui/ActionMenu";
+import { getEncryptedRoute } from "@/utils/routeCache";
+import { Switch } from "@/components/ui/switch";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
+import { combineFilters, useStatusFilter } from "@/components/filters/useOptionFilter";
+import { plantApi } from "@/helpers/admin";
+import { FilterBar } from "@/components/common/FilterBar";
+import { Can } from "@/contexts/ScreenPermissionContext";
+import { useScreenAccess } from "@/contexts/screenPermission";
+
+const toDisplay = (value: unknown): string =>
+  value === null || value === undefined || String(value).trim() === ""
+    ? "-"
+    : String(value);
+
+const toRecordList = (value: unknown): PlantRecord[] => {
+  if (Array.isArray(value)) return value as PlantRecord[];
+  if (
+    value &&
+    typeof value === "object" &&
+    Array.isArray((value as { results?: unknown }).results)
+  ) {
+    return (value as { results: PlantRecord[] }).results;
+  }
+  return [];
+};
+
+const SORTABLE_FIELDS = new Set(["name", "is_active"]);
+
+export default function PlantListPage() {
+  const { t } = useTranslation();
+  const { canEdit } = useScreenAccess();
+  const navigate = useNavigate();
+  const [pendingStatusId, setPendingStatusId] = useState<string | null>(null);
+  const [records, setRecords] = useState<PlantRecord[]>([]);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [first, setFirst] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [globalFilterValue, setGlobalFilterValue] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortField, setSortField] = useState<string | undefined>(undefined);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(undefined);
+  const requestIdRef = useRef(0);
+  const location = useLocation();
+  const restoredState = location.state as {
+    companyUniqueId?: string;
+    projectId?: string;
+  } | null;
+  const companyProject = useCompanyProjectFilter(() => setFirst(0), {
+    initialCompanyId: restoredState?.companyUniqueId,
+    initialProjectId: restoredState?.projectId,
+  });
+  const { companyId: companyUniqueId, projectId } = companyProject;
+  const { companies, isSuperAdmin } = companyProject.selection;
+  const statusFilter = useStatusFilter(() => setFirst(0));
+
+  const { encMasters, encPlants } = getEncryptedRoute();
+  const { newPath: ENC_NEW_PATH, editPath: ENC_EDIT_PATH } =
+    createCrudRoutePaths(encMasters, encPlants);
+
+  const ordering =
+    sortField && SORTABLE_FIELDS.has(sortField)
+      ? `${sortOrder === -1 ? "-" : ""}${sortField}`
+      : undefined;
+
+  const loadRows = async (
+    page: number,
+    limit: number,
+    search: string,
+    order?: string,
+  ) => {
+    const requestId = ++requestIdRef.current;
+    setIsLoading(true);
+    setRecords([]);
+    try {
+      const response = await plantApi.readAllwithPaginated(page, limit, {
+        params: {
+          company_id: companyUniqueId,
+          project_id: projectId || undefined,
+          ...(search ? { search } : {}),
+          ...(order ? { ordering: order } : {}),
+        },
+      });
+      if (requestId !== requestIdRef.current) return;
+      setRecords(toRecordList(response));
+      setTotalRecords(
+        typeof response?.count === "number"
+          ? response.count
+          : toRecordList(response).length,
+      );
+    } catch (error) {
+      if (requestId !== requestIdRef.current) return;
+      console.error("Failed to fetch plants", error);
+    } finally {
+      if (requestId === requestIdRef.current) setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isSuperAdmin && companies.length === 0) return;
+    if (!companyUniqueId && !isSuperAdmin) return;
+
+    void loadRows(first / rowsPerPage + 1, rowsPerPage, searchTerm, ordering);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    companyUniqueId,
+    projectId,
+    isSuperAdmin,
+    companies.length,
+    first,
+    rowsPerPage,
+    searchTerm,
+    ordering,
+  ]);
+
+  const rows = (() => {
+    if (isSuperAdmin && companies.length === 0) return [] as PlantRecord[];
+    if (!companyUniqueId && !isSuperAdmin) return [] as PlantRecord[];
+
+    return records.filter(statusFilter.matches);
+  })();
+
+  const onPage = (event: DataTablePageEvent) => {
+    setFirst(event.first);
+    setRowsPerPage(event.rows);
+  };
+
+  const onSort = (event: DataTableSortEvent) => {
+    setFirst(0);
+    setSortField(event.sortField);
+    setSortOrder(event.sortOrder);
+  };
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setFirst(0);
+      setSearchTerm(globalFilterValue);
+    }, 400);
+    return () => clearTimeout(timeout);
+  }, [globalFilterValue]);
+
+  const indexTemplate = (_: PlantRecord, { rowIndex }: { rowIndex: number }) =>
+    rowIndex + 1;
+
+  const handleDelete = async (id: string) => {
+    const reason = await confirmDeleteWithReason();
+    if (reason === null) return;
+
+    try {
+      await plantApi.delete(id, withDeleteReason(reason));
+      setRecords((current) => current.filter((item) => item.unique_id !== id));
+      Swal.fire({
+        icon: "success",
+        title: t("common.deleted_success"),
+        timer: 1500,
+        showConfirmButton: false,
+      });
+    } catch (error) {
+      Swal.fire({
+        icon: "error",
+        title: t("common.delete_failed"),
+        text: String(error ?? t("common.request_failed")),
+      });
+    }
+  };
+
+  const actionTemplate = (row: PlantRecord) => (
+    <div className="flex justify-center">
+      <ActionMenu
+        onEdit={() =>
+          navigate(ENC_EDIT_PATH(String(row.unique_id)), {
+            state: { companyUniqueId, projectId },
+          })
+        }
+        onDelete={() => void handleDelete(String(row.unique_id))}
+      />
+    </div>
+  );
+
+  const statusTemplate = (row: PlantRecord) => {
+    const updateStatus = async (value: boolean) => {
+      try {
+        setPendingStatusId(String(row.unique_id));
+        setIsUpdating(true);
+        await plantApi.update(row.unique_id, { is_active: value });
+        setRecords((current) =>
+          current.map((item) =>
+            item.unique_id === row.unique_id
+              ? { ...item, is_active: value }
+              : item,
+          ),
+        );
+      } catch (error) {
+        console.error("Failed to update plant status", error);
+      } finally {
+        setPendingStatusId(null);
+        setIsUpdating(false);
+      }
+    };
+
+    return (
+      <Switch
+        checked={Boolean(row.is_active)}
+        disabled={
+          !canEdit || (isUpdating && pendingStatusId === String(row.unique_id))
+        }
+        onCheckedChange={updateStatus}
+      />
+    );
+  };
+
+  // "All data" is exported server-side for the active filters, since the
+  // table is lazily paginated and only holds one page.
+  const onServerExport = (filename: string, sheetName: string) =>
+    plantApi.exportToExcel(
+      {
+        params: {
+          company_id: companyUniqueId,
+          project_id: projectId || undefined,
+          ...(searchTerm ? { search: searchTerm } : {}),
+        },
+      },
+      filename,
+      sheetName,
+    );
+
+  return (
+    <div className="min-h-full bg-gray-50/60 p-3 sm:p-5">
+      <div className="mb-4 flex min-w-0 flex-wrap items-start justify-between gap-3 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div className="min-w-0 flex-1">
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-teal-600">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-teal-50">
+              <i className="pi pi-building" />
+            </span>
+            Operations masters
+          </div>
+          <h1 className="text-2xl font-semibold text-gray-900 mb-1">Plant</h1>
+          <p className="text-sm text-gray-500">Manage plant records</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Can action="add">
+            <Button
+              label="Add Plant"
+              icon="pi pi-plus"
+              className="p-button-success"
+              onClick={() =>
+                navigate(ENC_NEW_PATH, { state: { companyUniqueId, projectId } })
+              }
+            />
+          </Can>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+      <DataTable
+        onServerExport={onServerExport}
+        header={
+          <FilterBar
+            searchValue={globalFilterValue}
+            onSearchChange={setGlobalFilterValue}
+            searchPlaceholder="Search plants…"
+          />
+        }
+        filterPanel={combineFilters(companyProject, statusFilter)}
+        value={rows}
+        dataKey="unique_id"
+        lazy
+        paginator
+        first={first}
+        rows={rowsPerPage}
+        totalRecords={totalRecords}
+        onPage={onPage}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        onSort={onSort}
+        rowsPerPageOptions={[5, 10, 25, 50]}
+        loading={isLoading}
+        stripedRows
+        showGridlines
+        className="p-datatable-sm"
+        emptyMessage="No plants found"
+      >
+        <Column
+          header={t("common.s_no")}
+          body={indexTemplate}
+          style={{ width: "80px" }}
+        />
+        <Column
+          field="name"
+          header="Plant Name"
+          sortable={SORTABLE_FIELDS.has("name")}
+          body={(row: PlantRecord) => toDisplay(row.name)}
+        />
+        <Column
+          field="project_name"
+          header={t("admin.nav.project")}
+          body={(row: PlantRecord) => toDisplay(row.project_name)}
+        />
+        <Column
+          field="latitude"
+          header="Latitude"
+          body={(row: PlantRecord) => toDisplay(row.latitude)}
+        />
+        <Column
+          field="longitude"
+          header="Longitude"
+          body={(row: PlantRecord) => toDisplay(row.longitude)}
+        />
+        <Column
+          header={t("common.status")}
+          body={statusTemplate}
+          style={{ width: "140px" }}
+        />
+        <Column
+          header={t("common.actions")}
+          body={actionTemplate}
+          style={{ width: "150px", textAlign: "center" }}
+        />
+      </DataTable>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,617 @@
+import type { HistoryRow, RawVehicle, TableFilters, TripData, VehicleOption, VisualStatus } from "./types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { JSX } from "react";
+import { applyTableFilters } from "@/utils/tableFilterMatch";
+import "./tripsummary.css";
+import "primereact/resources/themes/lara-light-cyan/theme.css";
+import "primereact/resources/primereact.min.css";
+import "primeicons/primeicons.css";
+import { DataTable } from "@/components/common/SafeDataTable";
+import { StackCell } from "@/components/common/TableCells";
+import { FilterBar } from "@/components/common/FilterBar";
+import { FormSelect } from "@/components/common/FormSelect";
+import { FilterSection, type ActiveFilterChip } from "@/components/common/ListToolbar";
+import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import { combineFilters, type FilterPart } from "@/components/filters/useOptionFilter";
+import { Column } from "primereact/column";
+import { FilterMatchMode } from "primereact/api";
+import { useTranslation } from "react-i18next";
+import { useProjectSelector } from "@/contexts/ProjectSelectorContext";
+import { ProjectSelectorBar } from "@/components/common/ProjectSelectorBar";
+import { buildTripSummaryUrl, buildVehicleTrackingUrl } from "@/config/gpsApiConfig";
+
+
+const STATUS_ICONS: Record<VisualStatus, JSX.Element> = {
+  moving: (
+    <div
+      style={{
+        width: 48,
+        height: 48,
+        borderRadius: "16px",
+        background:
+          "linear-gradient(135deg, rgba(240,253,244,0.35), rgba(16,185,129,0.4))",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: "1px solid rgba(16,185,129,0.55)",
+        boxShadow: "0 12px 28px rgba(16,185,129,0.35)",
+      }}
+    >
+      <svg viewBox="0 0 40 40" width="28" height="28" aria-hidden="true">
+        <circle cx="20" cy="20" r="15" fill="none" stroke="#10b981" strokeWidth="2" />
+        <path
+          d="M13 20h10l-4-4M23 20l-4 4"
+          fill="none"
+          stroke="#047857"
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M9 16h4M9 24h6"
+          stroke="#34d399"
+          strokeWidth="2"
+          strokeLinecap="round"
+        />
+      </svg>
+    </div>
+  ),
+  parked: (
+    <div
+      style={{
+        width: 48,
+        height: 48,
+        borderRadius: "16px",
+        background:
+          "linear-gradient(135deg, rgba(59,130,246,0.18), rgba(37,99,235,0.45))",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: "1px solid rgba(37,99,235,0.35)",
+        boxShadow: "0 10px 25px rgba(59,130,246,0.3)",
+      }}
+    >
+      <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
+        <path
+          d="M6 24V10a2 2 0 012-2h10a6 6 0 010 12H10v4"
+          fill="none"
+          stroke="#1d4ed8"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <circle cx="22" cy="12" r="2.2" fill="#93c5fd" />
+      </svg>
+    </div>
+  ),
+  idle: (
+    <div
+      style={{
+        width: 48,
+        height: 48,
+        borderRadius: "16px",
+        background:
+          "linear-gradient(135deg, rgba(251,191,36,0.2), rgba(217,119,6,0.45))",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: "1px solid rgba(217,119,6,0.35)",
+        boxShadow: "0 10px 25px rgba(251,191,36,0.25)",
+      }}
+    >
+      <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
+        <path
+          d="M12 10v12M20 10v12"
+          fill="none"
+          stroke="#b45309"
+          strokeWidth="2.4"
+          strokeLinecap="round"
+        />
+        <circle cx="16" cy="8" r="1.5" fill="#fcd34d" />
+        <circle cx="16" cy="24" r="1.5" fill="#fcd34d" />
+      </svg>
+    </div>
+  ),
+};
+
+
+const pad = (value: number) => String(value).padStart(2, "0");
+const formatInput = (date: Date) =>
+  `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}`;
+
+const isSameDate = (left: Date, right: Date) =>
+  left.getFullYear() === right.getFullYear() &&
+  left.getMonth() === right.getMonth() &&
+  left.getDate() === right.getDate();
+
+const shiftRangeByDays = (fromValue: string, toValue: string, offsetDays: number) => {
+  const from = new Date(fromValue);
+  const to = new Date(toValue);
+  from.setDate(from.getDate() + offsetDays);
+  to.setDate(to.getDate() + offsetDays);
+  return { from: formatInput(from), to: formatInput(to) };
+};
+
+const computeInitialRange = () => {
+  const to = new Date();
+  const from = new Date(to.getTime() - 6 * 60 * 60 * 1000);
+  return { from, to };
+};
+
+const normalizeVehicle = (record: RawVehicle): VehicleOption | null => {
+  const candidate =
+    record?.vehicleId ||
+    record?.vehicle_id ||
+    record?.vehicleNo ||
+    record?.regNo ||
+    record?.vehicle_number ||
+    record?.VehicleNo;
+  if (!candidate) return null;
+  const text = String(candidate).trim();
+  if (!text) return null;
+  return { id: text, label: text };
+};
+
+export default function TripSummary() {
+  const { t } = useTranslation();
+  const { gpsVehicleTrackingApi, gpsTripSummaryApi, gpsProviderName, gpsFcode, gpsTripUserId, loading: contextLoading } = useProjectSelector();
+  const TRACKING_API_URL = buildVehicleTrackingUrl(
+    { providerName: gpsProviderName, fcode: gpsFcode },
+    gpsVehicleTrackingApi
+  );
+  const TRIP_SUMMARY_API_URL = gpsTripSummaryApi;
+  const initialRange = useMemo(() => computeInitialRange(), []);
+  const [vehicles, setVehicles] = useState<VehicleOption[]>([]);
+  // Vehicle + From / To are all required for a trip summary. The Filters
+  // panel edits a draft; Apply commits it and fetches (the old "Go"), Reset
+  // goes back to the defaults (first vehicle, last 6 hours from page load).
+  const defaultSelection = {
+    vehicle: vehicles[0]?.id ?? "",
+    from: formatInput(initialRange.from),
+    to: formatInput(initialRange.to),
+  };
+  // the vehicle starts empty and is set once the roster has loaded
+  const selection = useDraftFilter({ empty: defaultSelection });
+  const { vehicle: vehicleId, from: fromDate, to: toDate } = selection.applied;
+  // latest selection, for commits made after an await (roster / fallback)
+  const selectionRef = useRef(selection);
+  useEffect(() => {
+    selectionRef.current = selection;
+  });
+  const [summary, setSummary] = useState<TripData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [rosterError, setRosterError] = useState("");
+  const [summaryError, setSummaryError] = useState("");
+  const [rosterReady, setRosterReady] = useState(false);
+  const initialFetchRef = useRef(false);
+  const fallbackAppliedRef = useRef(false);
+  // const [filters, setFilters] = useState<{
+  //   [key: string]: { value: string | null; matchMode: FilterMatchMode };
+  // }>({
+  //   global: { value: null, matchMode: FilterMatchMode.CONTAINS },
+  // });
+
+  const [filters, setFilters] = useState<TableFilters>({
+    global: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    startTime: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    endTime: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    intLoc: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    finLoc: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    position: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    duration: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    tripDistance: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    vehicleName: { value: null, matchMode: FilterMatchMode.CONTAINS },
+    startodo: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    endodo: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    totalTripLength: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    moveCount: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    parkCount: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+    idleCount: { value: null, matchMode: FilterMatchMode.STARTS_WITH },
+  });
+  const [globalFilterValue, setGlobalFilterValue] = useState("");
+
+  useEffect(() => {
+    let aborted = false;
+    const loadVehicles = async () => {
+      try {
+        if (!TRACKING_API_URL) throw new Error("Tracking API not configured");
+        const res = await fetch(TRACKING_API_URL);
+        if (!res.ok) throw new Error(`Roster error (${res.status})`);
+        const body = await res.json();
+        const payload = Array.isArray(body) ? body : body?.data;
+        if (!Array.isArray(payload)) throw new Error("Unexpected roster shape");
+        const normalized = payload
+          .map((record: RawVehicle) => normalizeVehicle(record))
+          .filter((record): record is VehicleOption => Boolean(record));
+
+        if (!aborted) {
+          if (normalized.length) {
+            setVehicles(normalized);
+            const current = selectionRef.current;
+            if (!normalized.some((item) => item.id === current.applied.vehicle)) {
+              current.commit({ ...current.applied, vehicle: normalized[0].id });
+            }
+            setRosterError("");
+          } else {
+            setVehicles([]);
+            selectionRef.current.commit({ ...selectionRef.current.applied, vehicle: "" });
+            setRosterError("admin.reports.trip_summary.roster_no_live");
+          }
+        }
+      } catch (error) {
+        console.error("Trip summary roster failed:", error);
+        if (!aborted) {
+          setVehicles([]);
+          selectionRef.current.commit({ ...selectionRef.current.applied, vehicle: "" });
+          setRosterError("admin.reports.trip_summary.roster_unavailable");
+        }
+      } finally {
+        if (!aborted) {
+          setRosterReady(true);
+        }
+      }
+    };
+
+    loadVehicles();
+    return () => {
+      aborted = true;
+    };
+  }, [TRACKING_API_URL]);
+
+  const fetchSummary = async (options?: {
+    vehicle?: string;
+    range?: { from: string; to: string };
+    allowFallback?: boolean;
+  }) => {
+    const vehicle = options?.vehicle ?? vehicleId;
+    if (!vehicle) {
+      setSummaryError("admin.reports.trip_summary.error_select_vehicle");
+      return;
+    }
+    const range = options?.range ?? { from: fromDate, to: toDate };
+    const fromMs = new Date(range.from).getTime();
+    const toMs = new Date(range.to).getTime();
+    if (Number.isNaN(fromMs) || Number.isNaN(toMs)) {
+      setSummaryError("admin.reports.trip_summary.error_invalid_range");
+      return;
+    }
+    if (fromMs >= toMs) {
+      setSummaryError("admin.reports.trip_summary.error_from_after_to");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setSummaryError("");
+
+      const fromUTC = fromMs;
+      const toUTC = toMs;
+
+      const apiUrl = buildTripSummaryUrl(
+        vehicle,
+        fromUTC,
+        toUTC,
+        { userId: gpsTripUserId, duration: "0" },
+        TRIP_SUMMARY_API_URL
+      );
+
+      const res = await fetch(apiUrl);
+      if (!res.ok) throw new Error(`Trip summary error (${res.status})`);
+      const data = await res.json();
+      const historyRows = data?.data?.historyConsilated ?? [];
+
+      if (data && data.data) {
+        setSummary(data.data);
+        if (!historyRows.length) {
+          const allowFallback = options?.allowFallback;
+          const today = new Date();
+          if (
+            allowFallback &&
+            !fallbackAppliedRef.current &&
+            isSameDate(new Date(range.from), today) &&
+            isSameDate(new Date(range.to), today)
+          ) {
+            const fallbackRange = shiftRangeByDays(range.from, range.to, -1);
+            fallbackAppliedRef.current = true;
+            selectionRef.current.commit({ vehicle, ...fallbackRange });
+            await fetchSummary({ vehicle, range: fallbackRange, allowFallback: false });
+            return;
+          }
+          setSummaryError("admin.reports.trip_summary.error_no_records");
+        }
+      } else {
+        setSummaryError("admin.reports.trip_summary.error_no_data");
+        setSummary(null);
+      }
+    } catch (err) {
+      console.error(err);
+      setSummaryError("admin.reports.trip_summary.error_fetch_failed");
+      setSummary(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!rosterReady || initialFetchRef.current) return;
+    initialFetchRef.current = true;
+    fetchSummary({ allowFallback: true });
+  }, [rosterReady]);
+
+  // Commit a selection and load it right away, as "Go" used to.
+  const applySelection = (next: typeof selection.applied) => {
+    selection.commit(next);
+    fetchSummary({ vehicle: next.vehicle, range: { from: next.from, to: next.to } });
+  };
+
+  const selectionChips: ActiveFilterChip[] = (["vehicle", "from", "to"] as const)
+    .filter((key) => selection.applied[key] !== defaultSelection[key])
+    .map((key) => ({
+      key,
+      label: key === "vehicle" ? "Vehicle" : key === "from" ? "From date" : "To date",
+      value: key === "vehicle" ? selection.applied[key] : selection.applied[key].replace("T", " "),
+      onRemove: () => applySelection({ ...selection.applied, [key]: defaultSelection[key] }),
+    }));
+
+  const selectionFilter: FilterPart = {
+    field: (
+      <>
+        <FilterSection label={t("admin.reports.trip_summary.filters.vehicle_id")}>
+          <FormSelect
+            value={selection.draft.vehicle}
+            onChange={(value) => selection.setField("vehicle", value)}
+            options={vehicles.map((vehicle) => ({ value: vehicle.id, label: vehicle.label }))}
+            placeholder={null}
+          />
+        </FilterSection>
+        <FilterSection label="Date range">
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-xs text-gray-500">
+              {t("admin.reports.trip_summary.filters.from_date")}
+              <input
+                type="datetime-local"
+                value={selection.draft.from}
+                onChange={(e) => selection.setField("from", e.target.value)}
+                className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
+              />
+            </label>
+            <label className="text-xs text-gray-500">
+              {t("admin.reports.trip_summary.filters.to_date")}
+              <input
+                type="datetime-local"
+                value={selection.draft.to}
+                onChange={(e) => selection.setField("to", e.target.value)}
+                className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
+              />
+            </label>
+          </div>
+        </FilterSection>
+      </>
+    ),
+    chips: selectionChips,
+    count: selectionChips.length,
+    apply: () => applySelection(selection.draft),
+    reset: () => applySelection(defaultSelection),
+  };
+
+  const onGlobalFilterChange = (value: string) => {
+    const updatedFilters = { ...filters };
+    updatedFilters["global"].value = value;
+    setFilters(updatedFilters);
+    setGlobalFilterValue(value);
+  };
+
+  const displaySummary = summary ?? {};
+  const historyRows = useMemo(
+    () => summary?.historyConsilated ?? [],
+    [summary],
+  );
+  const filteredHistoryRows = useMemo(
+    () =>
+      applyTableFilters(historyRows, filters, [
+        "intLoc",
+        "finLoc",
+        "position",
+      ]),
+    [filters, historyRows],
+  );
+  const exportRows = useMemo(
+    () =>
+      filteredHistoryRows.map((row, idx) => ({
+        [t("admin.reports.trip_summary.columns.s_no")]: idx + 1,
+        [t("admin.reports.trip_summary.columns.vehicle_no")]:
+          summary?.vehicleName || vehicleId,
+        [t("admin.reports.trip_summary.columns.start_time")]:
+          new Date(row.startTime).toLocaleString(),
+        [t("admin.reports.trip_summary.columns.start_address")]:
+          row.intLoc || "-",
+        [t("admin.reports.trip_summary.columns.end_time")]:
+          new Date(row.endTime).toLocaleString(),
+        [t("admin.reports.trip_summary.columns.end_address")]:
+          row.finLoc || "-",
+        [t("admin.reports.trip_summary.columns.position")]:
+          row.position || "-",
+        [t("admin.reports.trip_summary.columns.total_minutes")]:
+          Math.floor((row.duration ?? 0) / 60000),
+        [t("admin.reports.trip_summary.columns.distance")]:
+          row.tripDistance ?? 0,
+      })),
+    [filteredHistoryRows, summary?.vehicleName, t, vehicleId],
+  );
+
+  if (!contextLoading && (!TRACKING_API_URL || !TRIP_SUMMARY_API_URL)) {
+    return (
+      <div className="trip-summary-shell">
+        <ProjectSelectorBar />
+        <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+          <p className="text-base font-medium">GPS API not configured for this project.</p>
+          <p className="text-sm mt-1">Set a GPS API URL in the project settings to enable trip reports.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="trip-summary-shell">
+      <ProjectSelectorBar />
+      <div className="trip-summary-container">
+        <div className="trip-summary-header">
+          <h3>{t("admin.reports.trip_summary.title")}</h3>
+        </div>
+
+        {rosterError && <div className="trip-inline-alert">{t(rosterError)}</div>}
+        {summaryError && <div className="trip-inline-alert warning">{t(summaryError)}</div>}
+
+        <div className="summary-header">
+          <p>
+            <span>{t("admin.reports.trip_summary.summary.vehicle_no")}:</span>{" "}
+            {displaySummary.vehicleName || "-"}
+          </p>
+          <p>
+            <span>{t("admin.reports.trip_summary.summary.start_km")}:</span>{" "}
+            {displaySummary.startOdo ?? "-"}
+          </p>
+          <p>
+            <span>{t("admin.reports.trip_summary.summary.end_km")}:</span>{" "}
+            {displaySummary.endOdo ?? "-"}
+          </p>
+          <p>
+            <span>{t("admin.reports.trip_summary.summary.trip_distance")}:</span>{" "}
+            {displaySummary.totalTripLength ?? "-"} km
+          </p>
+        </div>
+
+        <div className="status-cards">
+          <div className="card moving">
+            <div className="icon-wrap">
+              {STATUS_ICONS.moving}
+            </div>
+            <div>
+              <p>{t("admin.reports.trip_summary.status.moving")}</p>
+              <strong>{displaySummary.moveCount ?? "-"}</strong>
+            </div>
+          </div>
+          <div className="card parked">
+            <div className="icon-wrap">
+              {STATUS_ICONS.parked}
+            </div>
+            <div>
+              <p>{t("admin.reports.trip_summary.status.parked")}</p>
+              <strong>{displaySummary.parkCount ?? "-"}</strong>
+            </div>
+          </div>
+          <div className="card idle">
+            <div className="icon-wrap">
+              {STATUS_ICONS.idle}
+            </div>
+            <div>
+              <p>{t("admin.reports.trip_summary.status.idle")}</p>
+              <strong>{displaySummary.idleCount ?? "-"}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="trip-table-card">
+          <DataTable
+            value={historyRows}
+            exportRows={exportRows}
+            exportSheetName={t("admin.reports.trip_summary.export_sheet")}
+            paginator
+            rows={10}
+            filters={filters}
+            globalFilterFields={["intLoc", "finLoc", "position"]}
+            filterPanel={combineFilters(selectionFilter)}
+            loading={loading}
+            header={
+              <FilterBar
+                searchValue={globalFilterValue}
+                onSearchChange={onGlobalFilterChange}
+                searchPlaceholder={t("admin.reports.trip_summary.search_placeholder")}
+                trailing={
+                  <div className="text-lg font-semibold text-gray-700">
+                    {t("admin.reports.trip_summary.records_title")}
+                  </div>
+                }
+              />
+            }
+            emptyMessage={t("admin.reports.trip_summary.empty_message")}
+            responsiveLayout="scroll"
+            stripedRows
+            showGridlines
+            className="p-datatable-sm"
+            fitWidth
+          >
+            <Column
+              header={t("admin.reports.trip_summary.columns.s_no")}
+              body={(_row, { rowIndex }) => rowIndex + 1}
+              style={{ width: "5%" }}
+            />
+            <Column
+              field="startTime"
+              header={t("admin.reports.trip_summary.columns.start_time")}
+              body={(row: HistoryRow) => (
+                <StackCell
+                  primary={new Date(row.startTime).toLocaleString()}
+                  lines={[{ icon: "pi-map-marker", value: row.intLoc || "-" }]}
+                />
+              )}
+              sortable
+              style={{ width: "24%" }}
+              filter
+              showFilterMatchModes={false}
+            />
+            <Column
+              field="endTime"
+              header={t("admin.reports.trip_summary.columns.end_time")}
+              body={(row: HistoryRow) => (
+                <StackCell
+                  primary={new Date(row.endTime).toLocaleString()}
+                  lines={[{ icon: "pi-map-marker", value: row.finLoc || "-" }]}
+                />
+              )}
+              sortable
+              style={{ width: "24%" }}
+              filter
+              showFilterMatchModes={false}
+            />
+            <Column
+              field="vehicleName"
+              header={t("admin.reports.trip_summary.columns.vehicle_no")}
+              body={() => displaySummary.vehicleName || vehicleId}
+              style={{ width: "14%" }}
+              filter
+              showFilterMatchModes={false}
+            />
+            <Column
+              field="position"
+              header={t("admin.reports.trip_summary.columns.position")}
+              body={(row: HistoryRow) => row.position || "-"}
+              style={{ width: "13%" }}
+              filter
+              showFilterMatchModes={false}
+
+            />
+            <Column
+              field="tripDistance"
+              header={t("admin.reports.trip_summary.columns.distance")}
+              body={(row: HistoryRow) => (
+                <StackCell
+                  primary={row.tripDistance ?? 0}
+                  lines={[
+                    {
+                      label: t("admin.reports.trip_summary.columns.total_minutes"),
+                      value: String(Math.floor((row.duration ?? 0) / 60000)),
+                    },
+                  ]}
+                />
+              )}
+              style={{ width: "20%" }}
+            />
+          </DataTable>
+        </div>
+      </div>
+    </div>
+  );
+}

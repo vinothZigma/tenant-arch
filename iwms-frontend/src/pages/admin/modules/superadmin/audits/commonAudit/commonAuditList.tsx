@@ -1,0 +1,881 @@
+import type {
+  AuditFilterOptions,
+  CommonAuditJsonValue,
+  CommonAuditRecord,
+  DiffLine,
+  ModuleFilterOption,
+} from "./types";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from "react";
+import Swal from "@/lib/notify";
+import { useTranslation } from "react-i18next";
+
+import { DataTable } from "@/components/common/SafeDataTable";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Column } from "primereact/column";
+import type {
+  DataTablePageEvent,
+  DataTableSortEvent,
+  SortOrder,
+} from "primereact/datatable";
+
+import { commonAuditApi } from "@/helpers/admin";
+import { Download, Eye, FileText, Paperclip } from "lucide-react";
+import {
+  collectAuditFiles,
+  countAuditFiles,
+  type AuditFileRef,
+} from "@/utils/auditFiles";
+import { FilterBar } from "@/components/common/FilterBar";
+import { FormSelect } from "@/components/common/FormSelect";
+import { FilterSection } from "@/components/common/ListToolbar";
+import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import {
+  combineFilters,
+  useOptionFilter,
+} from "@/components/filters/useOptionFilter";
+
+const SORTABLE_FIELDS = new Set([
+  "module_name",
+  "createdAt",
+  "company_name",
+  "project_name",
+]);
+
+// Sentinel for "company-wide, belongs to no project" — mirrors the backend,
+// since an empty string can't be distinguished from "no filter" in a query.
+const NO_PROJECT = "none";
+
+const toRecordList = (value: unknown): CommonAuditRecord[] => {
+  if (Array.isArray(value)) return value as CommonAuditRecord[];
+  if (
+    value &&
+    typeof value === "object" &&
+    Array.isArray((value as { results?: unknown }).results)
+  ) {
+    return (value as { results: CommonAuditRecord[] }).results;
+  }
+  return [];
+};
+
+const formatDateTime = (value?: string | null) =>
+  value ? new Date(value).toLocaleString() : "-";
+
+const formatJson = (value?: CommonAuditJsonValue) => {
+  if (value === undefined || value === null) return "-";
+  return JSON.stringify(value, null, 2);
+};
+
+const nameOf = (options: ModuleFilterOption[], value: string) =>
+  options.find((option) => option.value === value)?.label ?? value;
+
+const JsonViewer = ({
+  title,
+  value,
+}: {
+  title: string;
+  value?: CommonAuditJsonValue;
+}) => (
+  <div className="min-w-0">
+    <h3 className="mb-2 text-sm font-semibold text-gray-700">{title}</h3>
+    <pre className="max-h-[260px] overflow-auto rounded-md border bg-gray-50 p-3 text-xs leading-relaxed text-gray-800">
+      {formatJson(value)}
+    </pre>
+  </div>
+);
+
+function getChangedPaths(
+  prev: CommonAuditJsonValue,
+  next: CommonAuditJsonValue,
+  prefix = "",
+): Set<string> {
+  const changed = new Set<string>();
+  const isLeaf = (v: CommonAuditJsonValue) =>
+    v === null || typeof v !== "object" || Array.isArray(v);
+
+  if (isLeaf(prev) || isLeaf(next)) {
+    if (JSON.stringify(prev) !== JSON.stringify(next)) changed.add(prefix);
+    return changed;
+  }
+
+  const p = prev as Record<string, CommonAuditJsonValue>;
+  const n = next as Record<string, CommonAuditJsonValue>;
+  for (const key of Object.keys(n)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (!(key in p)) {
+      changed.add(path);
+    } else {
+      getChangedPaths(p[key], n[key], path).forEach((cp) => changed.add(cp));
+    }
+  }
+  return changed;
+}
+
+function buildDiffLines(
+  value: CommonAuditJsonValue,
+  changedPaths: Set<string>,
+  currentPath: string,
+  indent: number,
+  isLast: boolean,
+): DiffLine[] {
+  const pad = "  ".repeat(indent);
+  const childPad = "  ".repeat(indent + 1);
+  const suffix = isLast ? "" : ",";
+
+  if (value === null || typeof value !== "object") {
+    return [
+      {
+        content: pad + JSON.stringify(value) + suffix,
+        changed: changedPaths.has(currentPath),
+      },
+    ];
+  }
+
+  if (Array.isArray(value)) {
+    const isChanged = changedPaths.has(currentPath);
+    const formatted = JSON.stringify(value, null, 2).split("\n");
+    const result: DiffLine[] = formatted.map((line) => ({
+      content: pad + line,
+      changed: isChanged,
+    }));
+    if (result.length > 0) {
+      result[result.length - 1] = {
+        ...result[result.length - 1],
+        content: result[result.length - 1].content + suffix,
+      };
+    }
+    return result;
+  }
+
+  const obj = value as Record<string, CommonAuditJsonValue>;
+  const entries = Object.entries(obj);
+  const lines: DiffLine[] = [{ content: pad + "{", changed: false }];
+
+  entries.forEach(([key, val], i) => {
+    const childPath = currentPath ? `${currentPath}.${key}` : key;
+    const isChildLast = i === entries.length - 1;
+
+    if (val === null || typeof val !== "object") {
+      lines.push({
+        content: `${childPad}"${key}": ${JSON.stringify(val)}${isChildLast ? "" : ","}`,
+        changed: changedPaths.has(childPath),
+      });
+    } else if (Array.isArray(val)) {
+      const isChanged = changedPaths.has(childPath);
+      const formatted = JSON.stringify(val, null, 2).split("\n");
+      if (formatted.length === 1) {
+        lines.push({
+          content: `${childPad}"${key}": ${formatted[0]}${isChildLast ? "" : ","}`,
+          changed: isChanged,
+        });
+      } else {
+        lines.push({
+          content: `${childPad}"${key}": ${formatted[0]}`,
+          changed: isChanged,
+        });
+        for (let j = 1; j < formatted.length - 1; j++) {
+          lines.push({ content: childPad + formatted[j], changed: isChanged });
+        }
+        lines.push({
+          content: `${childPad}${formatted[formatted.length - 1]}${isChildLast ? "" : ","}`,
+          changed: isChanged,
+        });
+      }
+    } else {
+      const childLines = buildDiffLines(
+        val,
+        changedPaths,
+        childPath,
+        indent + 1,
+        isChildLast,
+      );
+      if (childLines.length > 0) {
+        childLines[0] = {
+          ...childLines[0],
+          content: `${childPad}"${key}": ${childLines[0].content.trimStart()}`,
+        };
+      }
+      lines.push(...childLines);
+    }
+  });
+
+  lines.push({ content: pad + "}" + suffix, changed: false });
+  return lines;
+}
+
+const DiffJsonViewer = ({
+  title,
+  newData,
+  previousData,
+}: {
+  title: string;
+  newData?: CommonAuditJsonValue;
+  previousData?: CommonAuditJsonValue;
+}) => {
+  const lines = useMemo(() => {
+    if (newData === undefined || newData === null) return null;
+    const changedPaths =
+      previousData !== undefined && previousData !== null
+        ? getChangedPaths(previousData, newData)
+        : new Set<string>();
+    return buildDiffLines(newData, changedPaths, "", 0, true);
+  }, [newData, previousData]);
+
+  return (
+    <div className="min-w-0">
+      <h3 className="mb-2 text-sm font-semibold text-gray-700">{title}</h3>
+      {lines === null ? (
+        <pre className="max-h-[260px] overflow-auto rounded-md border bg-gray-50 p-3 text-xs leading-relaxed text-gray-800">
+          -
+        </pre>
+      ) : (
+        <div className="max-h-[260px] overflow-auto rounded-md border bg-gray-50 p-3 text-xs leading-relaxed text-gray-800 font-mono whitespace-pre">
+          {lines.map((line, i) => (
+            <div key={i} className={line.changed ? "bg-green-200 rounded" : ""}>
+              {line.content || " "}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/** Documents & images referenced by an audit record — viewable and downloadable. */
+const AuditFilesSection = ({ record }: { record: CommonAuditRecord }) => {
+  const files = useMemo(() => collectAuditFiles(record), [record]);
+  const [previewImage, setPreviewImage] = useState<AuditFileRef | null>(null);
+  if (files.length === 0) return null;
+
+  return (
+    <div className="rounded-md border bg-white px-3 py-2">
+      <h3 className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+        <Paperclip className="h-3.5 w-3.5" />
+        Documents &amp; images ({files.length})
+      </h3>
+
+      {/* One compact row per file, two per line; an image's thumbnail opens the preview. */}
+      <div className="grid gap-x-4 sm:grid-cols-2">
+        {files.map((file) => (
+          <div key={file.url} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+            {file.kind === "image" ? (
+              <button
+                type="button"
+                onClick={() => setPreviewImage(file)}
+                title="Preview"
+                className="shrink-0 overflow-hidden rounded border border-gray-200 hover:ring-2 hover:ring-blue-300"
+              >
+                <img src={file.url} alt="" className="h-8 w-8 object-cover" loading="lazy" />
+              </button>
+            ) : (
+              <FileText className="h-5 w-5 shrink-0 text-gray-400" />
+            )}
+            <div className="min-w-0 flex-1 leading-tight">
+              <div className="truncate text-sm font-medium text-gray-800" title={file.name}>
+                {file.name}
+              </div>
+              <div className="truncate text-[11px] text-gray-500" title={file.field}>
+                {file.field} · {file.source === "previous" ? "before" : "after"}
+              </div>
+            </div>
+            <a
+              href={file.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="View"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-blue-100 text-blue-700 hover:bg-blue-50"
+            >
+              <Eye className="h-3.5 w-3.5" />
+            </a>
+            <a
+              href={file.url}
+              download={file.name}
+              title="Download"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-green-100 text-green-700 hover:bg-green-50"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </a>
+          </div>
+        ))}
+      </div>
+
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div className="max-h-[90vh] max-w-[90vw] overflow-auto rounded-lg bg-white p-3">
+            <img src={previewImage.url} alt={previewImage.name} className="max-h-[75vh] w-auto" />
+            <div className="mt-2 flex items-center justify-between gap-3 text-sm">
+              <span className="truncate text-gray-600">{previewImage.name}</span>
+              <a
+                href={previewImage.url}
+                download={previewImage.name}
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex shrink-0 items-center gap-1 rounded bg-green-700 px-3 py-1.5 font-medium text-white hover:bg-green-800"
+              >
+                <Download className="h-4 w-4" /> Download
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default function CommonAuditList() {
+  const { t } = useTranslation();
+
+  const [globalFilterValue, setGlobalFilterValue] = useState("");
+  const [selectedRecord, setSelectedRecord] =
+    useState<CommonAuditRecord | null>(null);
+  const [records, setRecords] = useState<CommonAuditRecord[]>([]);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [first, setFirst] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [isLoading, setIsLoading] = useState(false);
+  const requestIdRef = useRef(0);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortField, setSortField] = useState<string | undefined>(undefined);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(undefined);
+  const [moduleNameOptions, setModuleNameOptions] = useState<string[]>([]);
+  const [filterOptions, setFilterOptions] = useState<AuditFilterOptions | null>(
+    null,
+  );
+
+  const moduleOptions = useMemo<ModuleFilterOption[]>(
+    () =>
+      moduleNameOptions.map((moduleName) => ({
+        label: moduleName,
+        value: moduleName,
+      })),
+    [moduleNameOptions],
+  );
+
+  const companyOptions = useMemo<ModuleFilterOption[]>(
+    () =>
+      (filterOptions?.companies ?? []).map((c) => ({
+        label: c.name,
+        value: c.unique_id,
+      })),
+    [filterOptions],
+  );
+
+  const projectOptions = useMemo<ModuleFilterOption[]>(
+    () => [
+      // Lets a user isolate company-wide activity that belongs to no project.
+      { label: t("admin.common_audit.no_project"), value: NO_PROJECT },
+      ...(filterOptions?.projects ?? []).map((p) => ({
+        label: p.name,
+        value: p.unique_id,
+      })),
+    ],
+    [filterOptions, t],
+  );
+
+  const resetPage = () => setFirst(0);
+
+  // Module / Company → Project, edited in the Filters panel as a draft and
+  // sent once applied ("" = all).
+  const scope = useDraftFilter({
+    empty: { module: "", company: "", project: "" },
+    chips: {
+      module: {
+        label: t("admin.common_audit.module_filter_label"),
+        format: (value) => nameOf(moduleOptions, value),
+      },
+      company: {
+        label: t("admin.common_audit.company_filter_label"),
+        format: (value) => nameOf(companyOptions, value),
+        clears: ["project"],
+      },
+      project: {
+        label: t("admin.common_audit.project_filter_label"),
+        format: (value) => nameOf(projectOptions, value),
+      },
+    },
+    onAppliedChange: resetPage,
+  });
+  const {
+    module: moduleFilter,
+    company: companyFilter,
+    project: projectFilter,
+  } = scope.applied;
+  const draft = scope.draft;
+
+  // "" = all, "true"/"false" = only successful / only rejected writes.
+  const status = useOptionFilter({
+    param: "success",
+    label: t("admin.common_audit.status_filter_label"),
+    options: [
+      { label: t("admin.common_audit.success"), value: "true" },
+      { label: t("admin.common_audit.failed"), value: "false" },
+    ],
+    allLabel: t("common.all"),
+    onAppliedChange: resetPage,
+  });
+  const statusFilter = status.value;
+
+  const loading = isLoading && records.length === 0;
+
+  const onGlobalFilterChange = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      setGlobalFilterValue(e.target.value);
+    },
+    [],
+  );
+
+  const openDetails = useCallback((record: CommonAuditRecord) => {
+    setSelectedRecord(record);
+  }, []);
+
+  const closeDetails = useCallback(() => {
+    setSelectedRecord(null);
+  }, []);
+
+  const actionTemplate = useCallback(
+    (row: CommonAuditRecord) => (
+      <div className="flex justify-center">
+        <button
+          title={t("common.view")}
+          onClick={() => openDetails(row)}
+          className="text-blue-600 hover:text-blue-800"
+        >
+          {t("common.view")}
+        </button>
+      </div>
+    ),
+    [openDetails, t],
+  );
+
+  const methodTemplate = useCallback(
+    (row: CommonAuditRecord) => row.method ?? "-",
+    [],
+  );
+
+  const ordering =
+    sortField && SORTABLE_FIELDS.has(sortField)
+      ? `${sortOrder === -1 ? "-" : ""}${sortField}`
+      : undefined;
+
+  const loadRows = useCallback(
+    async (
+      page: number,
+      limit: number,
+      search: string,
+      orderingParam?: string,
+      moduleFilterValue?: string,
+      companyValue?: string,
+      projectValue?: string,
+      statusValue?: string,
+    ) => {
+      const requestId = ++requestIdRef.current;
+      setIsLoading(true);
+      setRecords([]);
+      try {
+        const response = await commonAuditApi.readAllwithPaginated(
+          page,
+          limit,
+          {
+            params: {
+              ...(search ? { search } : {}),
+              ...(orderingParam ? { ordering: orderingParam } : {}),
+              ...(moduleFilterValue ? { module_name: moduleFilterValue } : {}),
+              ...(companyValue ? { company_unique_id: companyValue } : {}),
+              ...(projectValue ? { project_unique_id: projectValue } : {}),
+              ...(statusValue ? { success: statusValue } : {}),
+            },
+          },
+        );
+        if (requestId !== requestIdRef.current) return;
+
+        const rows = toRecordList(response);
+        setRecords(rows);
+        setTotalRecords(
+          typeof response?.count === "number" ? response.count : rows.length,
+        );
+      } catch {
+        if (requestId !== requestIdRef.current) return;
+        Swal.fire(t("common.error"), t("common.fetch_failed"), "error");
+      } finally {
+        if (requestId === requestIdRef.current) setIsLoading(false);
+      }
+    },
+    [t],
+  );
+
+  useEffect(() => {
+    void loadRows(
+      first / rowsPerPage + 1,
+      rowsPerPage,
+      searchTerm,
+      ordering,
+      moduleFilter,
+      companyFilter,
+      projectFilter,
+      statusFilter,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    first,
+    rowsPerPage,
+    searchTerm,
+    ordering,
+    moduleFilter,
+    companyFilter,
+    projectFilter,
+    statusFilter,
+  ]);
+
+  // Distinct company/project/module/user values for the dropdowns, served by
+  // the backend's `filter-options` action rather than derived from the
+  // current page, so the lists stay complete — and stay scoped: a company
+  // user is never offered another company here.
+  //
+  // Refetched when the (draft) company changes so the project list only ever
+  // offers projects belonging to the company picked in the Filters panel.
+  useEffect(() => {
+    let mounted = true;
+
+    const loadFilterOptions = async () => {
+      try {
+        const data = (await commonAuditApi.read("filter-options", {
+          params: draft.company ? { company_unique_id: draft.company } : {},
+        })) as unknown as AuditFilterOptions;
+        if (!mounted || !data) return;
+        setFilterOptions(data);
+        setModuleNameOptions(Array.isArray(data.modules) ? data.modules : []);
+      } catch {
+        // Non-fatal: dropdowns simply won't have options if this fails.
+      }
+    };
+
+    void loadFilterOptions();
+
+    return () => {
+      mounted = false;
+    };
+  }, [draft.company]);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setFirst(0);
+      setSearchTerm(globalFilterValue);
+    }, 400);
+    return () => clearTimeout(timeout);
+  }, [globalFilterValue]);
+
+  // Feeds the table's "Download Excel" button: "All data" is exported on the
+  // server with the current filters, since the table is lazily paginated and
+  // only holds one page.
+  const serverExport = (filename: string, sheetName: string) =>
+    commonAuditApi.exportToExcel(
+      {
+        params: {
+          ...(searchTerm ? { search: searchTerm } : {}),
+          ...(moduleFilter ? { module_name: moduleFilter } : {}),
+          ...(companyFilter ? { company_unique_id: companyFilter } : {}),
+          ...(projectFilter ? { project_unique_id: projectFilter } : {}),
+          ...(statusFilter ? { success: statusFilter } : {}),
+        },
+      },
+      filename,
+      sheetName,
+    );
+
+  const onPage = (event: DataTablePageEvent) => {
+    setFirst(event.first);
+    setRowsPerPage(event.rows);
+  };
+
+  const onSort = (event: DataTableSortEvent) => {
+    setFirst(0);
+    setSortField(event.sortField);
+    setSortOrder(event.sortOrder);
+  };
+
+  // Each dropdown is labelled (with a hint) so its purpose is clear on sight.
+  const scopeField = (
+    <>
+      <FilterSection label={t("admin.common_audit.module_filter_label")}>
+        <FormSelect
+          value={draft.module}
+          onChange={(value) => scope.setField("module", value)}
+          options={moduleOptions}
+          placeholder={t("common.all")}
+          helpText={t("admin.common_audit.module_filter_hint")}
+        />
+      </FilterSection>
+      <FilterSection label="Company & project">
+        <div className="grid grid-cols-2 gap-2">
+          <FormSelect
+            label={t("admin.common_audit.company_filter_label")}
+            value={draft.company}
+            onChange={(value) =>
+              // A project belongs to one company, so a stale project filter
+              // would silently return nothing after switching company.
+              scope.setDraft((d) => ({ ...d, company: value, project: "" }))
+            }
+            options={companyOptions}
+            placeholder={t("common.all")}
+            helpText={t("admin.common_audit.company_filter_hint")}
+          />
+          <FormSelect
+            label={t("admin.common_audit.project_filter_label")}
+            value={draft.project}
+            onChange={(value) => scope.setField("project", value)}
+            options={projectOptions}
+            placeholder={t("common.all")}
+            helpText={t("admin.common_audit.project_filter_hint")}
+          />
+        </div>
+      </FilterSection>
+    </>
+  );
+
+  return (
+    <div className="p-3">
+      <div className="mb-4 flex min-w-0 flex-wrap items-start justify-between gap-3 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div className="min-w-0 flex-1">
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-amber-600">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-amber-50">
+              <i className="pi pi-history" />
+            </span>
+            System history
+          </div>
+          <h1 className="text-2xl font-semibold text-gray-800">
+            {t("admin.common_audit.list_title")}
+          </h1>
+          <p className="text-sm text-gray-500">
+            {t("admin.common_audit.list_subtitle")}
+          </p>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+      <DataTable
+        header={
+          <FilterBar
+            searchValue={globalFilterValue}
+            onSearchChange={(value) =>
+              onGlobalFilterChange({
+                target: { value },
+              } as ChangeEvent<HTMLInputElement>)
+            }
+            searchPlaceholder={t("admin.common_audit.search_placeholder")}
+          />
+        }
+        filterPanel={combineFilters({ ...scope, field: scopeField }, status)}
+        onServerExport={serverExport}
+        value={records}
+        dataKey="uuid"
+        lazy
+        paginator
+        first={first}
+        rows={rowsPerPage}
+        rowsPerPageOptions={[5, 10, 25, 50]}
+        totalRecords={totalRecords}
+        onPage={onPage}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        onSort={onSort}
+        loading={loading}
+        stripedRows
+        showGridlines
+        className="p-datatable-sm"
+        emptyMessage={t("admin.common_audit.empty_message")}
+      >
+        <Column
+          header={t("common.s_no")}
+          body={(_, { rowIndex }) => rowIndex + 1}
+          style={{ width: 70 }}
+        />
+        <Column
+          field="module_name"
+          header={t("admin.common_audit.module_name")}
+          sortable={SORTABLE_FIELDS.has("module_name")}
+        />
+        <Column
+          field="endpoint_name"
+          header={t("admin.common_audit.endpoint_name")}
+        />
+        <Column
+          field="method"
+          header={t("admin.common_audit.method")}
+          body={methodTemplate}
+        />
+        <Column
+          field="object_id"
+          header={t("admin.common_audit.object_id")}
+          body={(r: CommonAuditRecord) => r.object_id ?? "-"}
+        />
+        <Column
+          field="company_name"
+          header={t("admin.common_audit.company")}
+          sortable={SORTABLE_FIELDS.has("company_name")}
+          body={(r: CommonAuditRecord) => r.company_name ?? "-"}
+        />
+        <Column
+          field="project_name"
+          header={t("admin.common_audit.project")}
+          sortable={SORTABLE_FIELDS.has("project_name")}
+          body={(r: CommonAuditRecord) => r.project_name ?? "-"}
+        />
+        <Column
+          field="createdBy"
+          header={t("admin.common_audit.created_by")}
+          body={(r: CommonAuditRecord) => {
+            const name = r.created_by_name ?? r.createdBy;
+            if (!name) return "-";
+            return (
+              <div className="leading-tight">
+                <div className="font-medium text-gray-800">{name}</div>
+                {r.created_by_id ? (
+                  <div className="text-xs text-gray-500">{r.created_by_id}</div>
+                ) : null}
+              </div>
+            );
+          }}
+        />
+        <Column
+          field="success"
+          header={t("admin.common_audit.status")}
+          body={(r: CommonAuditRecord) =>
+            r.success === false ? (
+              <span
+                title={r.reason ?? undefined}
+                className="rounded bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+              >
+                {t("admin.common_audit.failed")}
+              </span>
+            ) : (
+              <span className="rounded bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700">
+                {t("admin.common_audit.success")}
+              </span>
+            )
+          }
+        />
+        <Column
+          header={t("admin.common_audit.files", "Files")}
+          body={(r: CommonAuditRecord) => {
+            const count = countAuditFiles(r);
+            if (!count) return <span className="text-gray-300">-</span>;
+            return (
+              <span
+                title={t("admin.common_audit.files_attached", `${count} file(s) attached — open details to view`)}
+                className="inline-flex items-center gap-1 rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700"
+              >
+                <Paperclip className="h-3 w-3" />
+                {count}
+              </span>
+            );
+          }}
+          style={{ width: 90 }}
+          bodyStyle={{ textAlign: "center" }}
+        />
+        <Column
+          field="createdAt"
+          header={t("admin.common_audit.created_at")}
+          body={(r: CommonAuditRecord) => formatDateTime(r.createdAt)}
+          sortable={SORTABLE_FIELDS.has("createdAt")}
+        />
+        <Column
+          header={t("common.actions")}
+          body={actionTemplate}
+          style={{ width: 120 }}
+        />
+      </DataTable>
+      </div>
+
+      <Dialog
+        open={Boolean(selectedRecord)}
+        onOpenChange={(open) => !open && closeDetails()}
+      >
+        <DialogContent className="max-h-[90vh] max-w-5xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{t("admin.common_audit.detail_title")}</DialogTitle>
+          </DialogHeader>
+
+          <div className="grid gap-x-3 gap-y-2 rounded-md border bg-gray-50 px-3 py-2 text-sm sm:grid-cols-2">
+            <div>
+              <div className="text-xs text-gray-500">
+                {t("admin.common_audit.status")}
+              </div>
+              <div
+                className={
+                  selectedRecord?.success === false
+                    ? "font-medium text-red-700"
+                    : "font-medium text-green-700"
+                }
+              >
+                {selectedRecord?.success === false
+                  ? t("admin.common_audit.failed")
+                  : t("admin.common_audit.success")}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">
+                {t("admin.common_audit.ip_address")}
+              </div>
+              <div>{selectedRecord?.ip_address || "-"}</div>
+            </div>
+            {selectedRecord?.reason ? (
+              <div className="sm:col-span-2">
+                <div className="text-xs text-gray-500">
+                  {t("admin.common_audit.reason")}
+                </div>
+                <div className="text-red-700">{selectedRecord.reason}</div>
+              </div>
+            ) : null}
+            {selectedRecord?.delete_reason ? (
+              <div className="sm:col-span-2">
+                <div className="text-xs text-gray-500">
+                  {t("common.delete_reason_label")}
+                </div>
+                <div className="whitespace-pre-line">{selectedRecord.delete_reason}</div>
+              </div>
+            ) : null}
+            <div className="min-w-0 sm:col-span-2">
+              <div className="text-xs text-gray-500">
+                {t("admin.common_audit.user_agent")}
+              </div>
+              <div className="break-words text-xs text-gray-700">
+                {selectedRecord?.user_agent || "-"}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <JsonViewer
+              title={t("admin.common_audit.previous_data")}
+              value={selectedRecord?.previous_data}
+            />
+            <DiffJsonViewer
+              title={t("admin.common_audit.new_data")}
+              newData={selectedRecord?.new_data}
+              previousData={selectedRecord?.previous_data}
+            />
+          </div>
+
+          {selectedRecord && (
+            <div className="mt-1">
+              <AuditFilesSection record={selectedRecord} />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

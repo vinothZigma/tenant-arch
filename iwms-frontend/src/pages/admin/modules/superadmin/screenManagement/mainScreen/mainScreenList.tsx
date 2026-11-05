@@ -1,0 +1,274 @@
+import { createCrudRoutePaths } from "@/utils/routePaths";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import Swal from "@/lib/notify";
+import { confirmDeleteWithReason, withDeleteReason } from "@/utils/deleteReason";
+
+import { DataTable } from "@/components/common/SafeDataTable";
+import { Column } from "primereact/column";
+import { Button } from "primereact/button";
+import { useTranslation } from "react-i18next";
+
+import "primereact/resources/themes/lara-light-cyan/theme.css";
+import "primereact/resources/primereact.min.css";
+import "primeicons/primeicons.css";
+
+import { ActionMenu } from "@/components/ui/ActionMenu";
+import { getEncryptedRoute } from "@/utils/routeCache";
+import { Switch } from "@/components/ui/switch";
+import { mainScreenApi } from "@/helpers/admin";
+import { FilterBar } from "@/components/common/FilterBar";
+import { useFilterBarFilters } from "@/hooks/useFilterBarFilters";
+import { combineFilters } from "@/components/filters/useOptionFilter";
+import { filterRowsForExport } from "@/utils/adminListExport";
+import { Can } from "@/contexts/ScreenPermissionContext";
+import { useScreenAccess } from "@/contexts/screenPermission";
+
+import type { MainScreen } from "../shared/admin.types"; // Correct import
+
+const MAIN_SCREEN_SEARCH_FIELDS = [
+  "mainscreen_name",
+  "mainscreentype_name",
+  "icon_name",
+  "description",
+];
+
+const toRecordList = (value: unknown): MainScreen[] => {
+  if (Array.isArray(value)) return value as MainScreen[];
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.results)) return record.results as MainScreen[];
+    if (Array.isArray(record.data)) return record.data as MainScreen[];
+  }
+  return [];
+};
+
+export default function MainScreenList() {
+  const { t } = useTranslation();
+  const [records, setRecords] = useState<MainScreen[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+
+  const {
+    filters,
+    onFilter,
+    globalFilterValue,
+    onGlobalFilterChange,
+    statusValue,
+    statusFilter,
+  } = useFilterBarFilters();
+
+  const navigate = useNavigate();
+  const { canEdit } = useScreenAccess();
+  const { encAdmins, encMainScreen } = getEncryptedRoute();
+
+  const { newPath: ENC_NEW_PATH, editPath: ENC_EDIT_PATH } = createCrudRoutePaths(
+    encAdmins,
+    encMainScreen,
+  );
+
+  const loadRecords = async () => {
+    const requestId = ++requestIdRef.current;
+    setIsLoading(true);
+    try {
+      const response = await mainScreenApi.readAll();
+      if (requestId !== requestIdRef.current) return;
+      setRecords(toRecordList(response));
+    } catch {
+      if (requestId !== requestIdRef.current) return;
+      Swal.fire(t("common.error"), t("common.load_failed"), "error");
+    } finally {
+      if (requestId === requestIdRef.current) setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRecords();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ------------------------------
+      STATUS SWITCH
+  ------------------------------ */
+  const statusTemplate = (row: MainScreen) => {
+    const updateStatus = async (value: boolean) => {
+      setUpdatingStatusId(row.unique_id);
+      try {
+        await mainScreenApi.update(row.unique_id, {
+          mainscreen_name: row.mainscreen_name,
+          mainscreentype_id: row.mainscreentype_id,
+          icon_name: row.icon_name,
+          order_no: row.order_no,
+          description: row.description,
+          is_active: value,
+        });
+        setRecords((current) =>
+          current.map((item) =>
+            item.unique_id === row.unique_id
+              ? { ...item, is_active: value }
+              : item
+          )
+        );
+      } catch {
+        Swal.fire(t("common.error"), t("common.update_status_failed"), "error");
+      } finally {
+        setUpdatingStatusId(null);
+      }
+    };
+
+    return (
+      <Switch
+        checked={row.is_active}
+        disabled={!canEdit || updatingStatusId === row.unique_id}
+        onCheckedChange={updateStatus}
+      />
+    );
+  };
+
+  /* ------------------------------
+      ACTION BUTTONS
+  ------------------------------ */
+  const handleDelete = async (id: string) => {
+    const reason = await confirmDeleteWithReason();
+    if (reason === null) return;
+
+    try {
+      await mainScreenApi.delete(id, withDeleteReason(reason));
+      setRecords((current) => current.filter((item) => item.unique_id !== id));
+      Swal.fire({
+        icon: "success",
+        title: t("common.deleted_success"),
+        timer: 1500,
+        showConfirmButton: false,
+      });
+    } catch (error) {
+      Swal.fire({
+        icon: "error",
+        title: t("common.delete_failed"),
+        text: String(error ?? t("common.request_failed")),
+      });
+    }
+  };
+
+  const actionTemplate = (row: MainScreen) => (
+    <div className="flex justify-center">
+      <ActionMenu
+        onEdit={() => navigate(ENC_EDIT_PATH(row.unique_id))}
+        onDelete={() => void handleDelete(row.unique_id)}
+      />
+    </div>
+  );
+
+  /* ------------------------------
+      Table Header
+  ------------------------------ */
+  const header = (
+    <FilterBar
+      searchValue={globalFilterValue}
+      onSearchChange={onGlobalFilterChange}
+      searchPlaceholder={t("common.search_placeholder")}
+    />
+  );
+
+  const exportRows = useMemo(
+    () => filterRowsForExport(records, MAIN_SCREEN_SEARCH_FIELDS, globalFilterValue, statusValue),
+    [records, globalFilterValue, statusValue],
+  );
+
+  return (
+    <div className="px-3 py-3 w-full "> 
+        {/* Header */}
+        <div className="flex min-w-0 flex-wrap items-start justify-between gap-3 mb-4">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-2xl font-semibold text-gray-800 mb-1">
+              {t("admin.nav.main_screen")}
+            </h1>
+            <p className="text-sm text-gray-500">
+              {t("common.manage_item_records", {
+                item: t("admin.nav.main_screen"),
+              })}
+            </p>
+          </div>
+
+          <Can action="add">
+            <Button
+              label={t("common.add_item", { item: t("admin.nav.main_screen") })}
+              icon="pi pi-plus"
+              className="p-button-success"
+              onClick={() => navigate(ENC_NEW_PATH)}
+            />
+          </Can>
+        </div>
+
+        <DataTable
+          filterPanel={combineFilters(statusFilter)}
+          value={records}
+          exportRows={exportRows}
+          paginator
+          rows={10}
+          loading={isLoading}
+          filters={filters}
+          onFilter={onFilter}
+          rowsPerPageOptions={[5, 10, 25, 50]}
+          globalFilterFields={MAIN_SCREEN_SEARCH_FIELDS}
+          header={header}
+          stripedRows
+          showGridlines
+          fitWidth
+          emptyMessage={t("common.no_items_found", {
+            item: t("admin.nav.main_screen"),
+          })}
+          className="p-datatable-sm"
+        >
+          <Column
+            header={t("common.s_no")}
+            body={(_, { rowIndex }) => rowIndex + 1}
+            style={{ width: "5%" }}
+          />
+
+          <Column
+            field="mainscreen_name"
+            header={t("common.item_name", { item: t("admin.nav.main_screen") })}
+            sortable
+            style={{ width: "18%" }}
+          />
+          <Column
+            field="mainscreentype_name"
+            header={t("admin.nav.main_screen_type")}
+            sortable
+            style={{ width: "15%" }}
+          />
+          <Column
+            field="icon_name"
+            header={t("common.icon_name")}
+            sortable
+            style={{ width: "14%" }}
+          />
+          <Column
+            field="order_no"
+            header={t("common.order_no")}
+            sortable
+            style={{ width: "8%" }}
+          />
+          <Column
+            field="description"
+            header={t("common.description")}
+            sortable
+            style={{ width: "23%" }}
+          />
+
+          <Column
+            header={t("common.status")}
+            body={statusTemplate}
+            style={{ width: "9%" }}
+          />
+
+          <Column
+            header={t("common.actions")}
+            body={actionTemplate}
+            style={{ width: "8%" }}
+          />
+        </DataTable>
+    </div>
+  );
+}

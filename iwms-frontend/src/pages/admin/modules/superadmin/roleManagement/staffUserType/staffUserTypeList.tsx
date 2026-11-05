@@ -1,0 +1,331 @@
+import type { StaffUserTypeRow } from "./types";
+import { createCrudRoutePaths } from "@/utils/routePaths";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import Swal from "@/lib/notify";
+import { confirmDeleteWithReason, withDeleteReason } from "@/utils/deleteReason";
+
+import { DataTable } from "@/components/common/SafeDataTable";
+import { Column } from "primereact/column";
+import { Button } from "primereact/button";
+import { useTranslation } from "react-i18next";
+
+import "primereact/resources/themes/lara-light-cyan/theme.css";
+import "primereact/resources/primereact.min.css";
+import "primeicons/primeicons.css";
+
+import { ActionMenu } from "@/components/ui/ActionMenu";
+import { getEncryptedRoute } from "@/utils/routeCache";
+import { Switch } from "@/components/ui/switch";
+import { contractorUserTypeApi, staffUserTypeApi } from "@/helpers/admin";
+import { FilterBar } from "@/components/common/FilterBar";
+import { useFilterBarFilters } from "@/hooks/useFilterBarFilters";
+import { combineFilters } from "@/components/filters/useOptionFilter";
+import { filterRowsForExport } from "@/utils/adminListExport";
+
+import type { StaffUserType } from "../../screenManagement/shared/admin.types";
+import { Can } from "@/contexts/ScreenPermissionContext";
+import { useScreenAccess } from "@/contexts/screenPermission";
+
+const STAFF_USER_TYPE_SEARCH_FIELDS = ["name", "usertype_name", "category"];
+
+
+const toRecordList = (value: unknown): StaffUserType[] => {
+  if (Array.isArray(value)) return value as StaffUserType[];
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.results)) return record.results as StaffUserType[];
+    if (Array.isArray(record.data)) return record.data as StaffUserType[];
+  }
+  return [];
+};
+
+const extractErrorMessage = (error: unknown, fallback: string) => {
+  const data = (error as { response?: { data?: unknown } }).response?.data;
+
+  if (typeof data === "string") return data;
+  if (Array.isArray(data)) return data.join(", ");
+  if (data && typeof data === "object") {
+    return Object.entries(data as Record<string, unknown>)
+      .map(([key, value]) =>
+        `${key}: ${Array.isArray(value) ? value.join(", ") : String(value)}`
+      )
+      .join("\n");
+  }
+
+  return fallback;
+};
+
+
+export default function StaffUserTypeList() {
+  const { t } = useTranslation();
+  const [staffUserTypes, setStaffUserTypes] = useState<StaffUserType[]>([]);
+  const [contractorUserTypes, setContractorUserTypes] = useState<StaffUserType[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isUpdatingStaff, setIsUpdatingStaff] = useState(false);
+  const [isUpdatingContractor, setIsUpdatingContractor] = useState(false);
+  const [pendingStatusId, setPendingStatusId] = useState<string | null>(null);
+
+  const {
+    filters,
+    onFilter,
+    globalFilterValue,
+    onGlobalFilterChange,
+    statusValue,
+    statusFilter,
+  } = useFilterBarFilters();
+
+  const navigate = useNavigate();
+  const { canEdit } = useScreenAccess();
+  const { encAdmins, encStaffUserType } = getEncryptedRoute();
+
+  const { newPath: ENC_NEW_PATH, editPath: ENC_EDIT_PATH } = createCrudRoutePaths(
+    encAdmins,
+    encStaffUserType,
+  );
+
+  const loadRecords = async () => {
+    setIsLoading(true);
+    try {
+      const [staffRes, contractorRes] = await Promise.all([
+        staffUserTypeApi.readAll(),
+        contractorUserTypeApi.readAll(),
+      ]);
+      setStaffUserTypes(toRecordList(staffRes));
+      setContractorUserTypes(toRecordList(contractorRes));
+    } catch {
+      Swal.fire(t("common.error"), t("common.fetch_failed"), "error");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRecords();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const records = useMemo(() => {
+    const isGeneratedUserTypeId = (value: unknown) =>
+      typeof value === "string" && value.startsWith("UTYPE-");
+
+    const normalize = (list: StaffUserType[], category: "Staff" | "Contractor") =>
+      (list ?? []).map((item) => ({
+        ...item,
+        usertype_id: isGeneratedUserTypeId(item.usertype_id)
+          ? item.usertype_id
+          : item.usertype?.unique_id ?? null,
+        usertype_name:
+          item.usertype_name ??
+          item.usertype?.name ??
+          (!isGeneratedUserTypeId(item.usertype_id) ? item.usertype_id : null) ??
+          category,
+        category,
+      }));
+
+    return [
+      ...normalize(staffUserTypes, "Staff"),
+      ...normalize(contractorUserTypes, "Contractor"),
+    ];
+  }, [staffUserTypes, contractorUserTypes, t]);
+
+  /* -----------------------------------------------------------
+     STATUS SWITCH
+  ----------------------------------------------------------- */
+  const updateStatus = async (row: any, checked: boolean) => {
+    const id = String(row.unique_id);
+    setPendingStatusId(id);
+
+    try {
+      if (row.category === "Contractor") {
+        setIsUpdatingContractor(true);
+        await contractorUserTypeApi.update(row.unique_id, { is_active: checked });
+      } else {
+        setIsUpdatingStaff(true);
+        await staffUserTypeApi.update(row.unique_id, { is_active: checked });
+      }
+      await loadRecords();
+    } catch (error: any) {
+      console.error("Update Status Error:", error?.response?.data || error);
+      Swal.fire(
+        t("common.error"),
+        extractErrorMessage(error, t("common.update_status_failed")),
+        "error"
+      );
+    } finally {
+      setIsUpdatingContractor(false);
+      setIsUpdatingStaff(false);
+      setPendingStatusId(null);
+    }
+  };
+
+  const statusTemplate = (row: any) => {
+    const id = String(row.unique_id);
+    const isPending =
+      (row.category === "Contractor"
+        ? isUpdatingContractor
+        : isUpdatingStaff) && pendingStatusId === id;
+    return (
+      <Switch
+        checked={row.is_active}
+        disabled={!canEdit || isPending}
+        onCheckedChange={(checked) => void updateStatus(row, checked)}
+      />
+    );
+  };
+
+  /* -----------------------------------------------------------
+     DELETE
+  ----------------------------------------------------------- */
+  const handleDelete = async (row: any) => {
+    const reason = await confirmDeleteWithReason();
+    if (reason === null) return;
+
+    try {
+      if (row.category === "Contractor") {
+        await contractorUserTypeApi.delete(row.unique_id, withDeleteReason(reason));
+      } else {
+        await staffUserTypeApi.delete(row.unique_id, withDeleteReason(reason));
+      }
+      await loadRecords();
+      Swal.fire({
+        icon: "success",
+        title: t("common.deleted_success"),
+        timer: 1500,
+        showConfirmButton: false,
+      });
+    } catch (error) {
+      Swal.fire(
+        t("common.error"),
+        extractErrorMessage(error, t("common.delete_failed")),
+        "error",
+      );
+    }
+  };
+
+  /* -----------------------------------------------------------
+     ACTION BUTTONS
+  ----------------------------------------------------------- */
+  const actionTemplate = (row: StaffUserTypeRow) => (
+    <div className="flex justify-center">
+      <ActionMenu
+        onEdit={() => navigate(ENC_EDIT_PATH(row.unique_id))}
+        onDelete={() => void handleDelete(row)}
+      />
+    </div>
+  );
+
+  /* -----------------------------------------------------------
+     INDEX COLUMN
+  ----------------------------------------------------------- */
+  const indexTemplate = (_: StaffUserType, { rowIndex }: any) =>
+    rowIndex + 1;
+
+  const header = (
+    <FilterBar
+      searchValue={globalFilterValue}
+      onSearchChange={onGlobalFilterChange}
+      searchPlaceholder={t("common.search_placeholder")}
+    />
+  );
+
+  const exportRows = useMemo(
+    () =>
+      filterRowsForExport(
+        records,
+        STAFF_USER_TYPE_SEARCH_FIELDS,
+        globalFilterValue,
+        statusValue,
+      ),
+    [records, globalFilterValue, statusValue],
+  );
+
+  /* -----------------------------------------------------------
+     RENDER
+  ----------------------------------------------------------- */
+  return (
+    <div className="p-3">
+  
+
+        <div className="flex min-w-0 flex-wrap items-start justify-between gap-3 mb-4">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-2xl font-semibold text-gray-800">
+              {t("admin.nav.staff_user_type")}
+            </h1>
+            <p className="text-sm text-gray-500">
+              {t("common.manage_item_records", {
+                item: t("admin.nav.staff_user_type"),
+              })}
+            </p>
+          </div>
+
+          <Can action="add">
+            <Button
+              label={t("common.add_item", {
+                item: t("admin.nav.staff_user_type"),
+              })}
+              icon="pi pi-plus"
+              className="p-button-success"
+              onClick={() => navigate(ENC_NEW_PATH)}
+            />
+          </Can>
+        </div>
+
+        <DataTable
+          filterPanel={combineFilters(statusFilter)}
+          value={records}
+          exportRows={exportRows}
+          paginator
+          rows={10}
+          loading={isLoading && records.length === 0}
+          filters={filters}
+          onFilter={onFilter}
+          rowsPerPageOptions={[5, 10, 25, 50]}
+          globalFilterFields={STAFF_USER_TYPE_SEARCH_FIELDS}
+          header={header}
+          stripedRows
+          showGridlines
+          emptyMessage={t("common.no_items_found", {
+            item: t("admin.nav.staff_user_type"),
+          })}
+          className="p-datatable-sm"
+        >
+          <Column header={t("common.s_no")} body={indexTemplate} style={{ width: 80 }} />
+          <Column
+            field="usertype_name"
+            header={t("admin.nav.user_type")}
+            sortable
+            style={{ minWidth: 150 }}
+          />
+          {/* <Column
+            field="category"
+            header="Type"
+            body={categoryTemplate}
+            sortable
+            style={{ minWidth: 120 }}
+          /> */}
+          <Column
+            field="name"
+            header={t("admin.nav.staff_user_type")}
+            sortable
+            style={{ minWidth: 180 }}
+          />
+
+          
+
+          <Column
+            header={t("common.status")}
+            body={statusTemplate}
+            style={{ width: 120 }}
+          />
+
+          <Column
+            header={t("common.actions")}
+            body={actionTemplate}
+            style={{ width: 150 }}
+          />
+
+        </DataTable>
+    </div>
+  );
+}

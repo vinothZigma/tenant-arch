@@ -1,0 +1,279 @@
+import { createCrudRoutePaths } from "@/utils/routePaths";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import Swal from "@/lib/notify";
+import { confirmDeleteWithReason, withDeleteReason } from "@/utils/deleteReason";
+import { DataTable } from "@/components/common/SafeDataTable";
+import { Column } from "primereact/column";
+import { Button } from "primereact/button";
+import type {
+  DataTablePageEvent,
+  DataTableSortEvent,
+  SortOrder,
+} from "primereact/datatable";
+import { Switch } from "@/components/ui/switch";
+import { ActionMenu } from "@/components/ui/ActionMenu";
+import { designationApi } from "@/helpers/admin";
+import { getEncryptedRoute } from "@/utils/routeCache";
+import { FilterBar } from "@/components/common/FilterBar";
+import { useFilterBarFilters } from "@/hooks/useFilterBarFilters";
+import { combineFilters } from "@/components/filters/useOptionFilter";
+import {
+  exportRecordsToExcel,
+  getAdminScreenExcelFilename,
+} from "@/utils/exportExcel";
+import { Can } from "@/contexts/ScreenPermissionContext";
+import { useScreenAccess } from "@/contexts/screenPermission";
+
+const { encStaffMasters, encDesignations } = getEncryptedRoute();
+const { newPath: NEW_PATH } = createCrudRoutePaths(
+  encStaffMasters,
+  encDesignations,
+);
+const { editPath } = createCrudRoutePaths(encStaffMasters, encDesignations);
+
+type DesignationRecord = {
+  unique_id: string | number;
+  designation_name?: string;
+  department_id?: string | number | null;
+  department_name?: string;
+  description?: string;
+  is_active?: boolean;
+};
+
+const unwrapRows = (response: unknown): DesignationRecord[] => {
+  if (Array.isArray(response)) return response as DesignationRecord[];
+  const results = (response as { results?: unknown } | null)?.results;
+  return Array.isArray(results) ? (results as DesignationRecord[]) : [];
+};
+
+const SORTABLE_FIELDS = new Set(["designation_name"]);
+
+export default function DesignationListPage() {
+  const navigate = useNavigate();
+  const { canEdit } = useScreenAccess();
+  const [records, setRecords] = useState<DesignationRecord[]>([]);
+
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [first, setFirst] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [isLoading, setIsLoading] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortField, setSortField] = useState<string | undefined>(undefined);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(undefined);
+  const requestIdRef = useRef(0);
+
+  const {
+    globalFilterValue,
+    onGlobalFilterChange,
+    statusValue,
+    statusFilter,
+  } = useFilterBarFilters();
+
+  const ordering =
+    sortField && SORTABLE_FIELDS.has(sortField)
+      ? `${sortOrder === -1 ? "-" : ""}${sortField}`
+      : undefined;
+
+  const loadRows = async (
+    page: number,
+    limit: number,
+    search: string,
+    status: typeof statusValue,
+    order?: string,
+  ) => {
+    const requestId = ++requestIdRef.current;
+    setIsLoading(true);
+    setRecords([]);
+    try {
+      const response = await designationApi.readAllwithPaginated(page, limit, {
+        params: {
+          ...(search ? { search } : {}),
+          ...(status !== "all" ? { is_active: status === "active" } : {}),
+          ...(order ? { ordering: order } : {}),
+        },
+      });
+      if (requestId !== requestIdRef.current) return;
+      const rows = unwrapRows(response);
+      setRecords(rows);
+      setTotalRecords(
+        typeof (response as { count?: number })?.count === "number"
+          ? (response as { count?: number }).count!
+          : rows.length,
+      );
+    } catch {
+      if (requestId !== requestIdRef.current) return;
+      Swal.fire("Error", "Failed to load designations", "error");
+    } finally {
+      if (requestId === requestIdRef.current) setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRows(
+      first / rowsPerPage + 1,
+      rowsPerPage,
+      searchTerm,
+      statusValue,
+      ordering,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [first, rowsPerPage, searchTerm, statusValue, ordering]);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setFirst(0);
+      setSearchTerm(globalFilterValue);
+    }, 400);
+    return () => clearTimeout(timeout);
+  }, [globalFilterValue]);
+
+  const onPage = (event: DataTablePageEvent) => {
+    setFirst(event.first);
+    setRowsPerPage(event.rows);
+  };
+
+  const onSort = (event: DataTableSortEvent) => {
+    setFirst(0);
+    setSortField(event.sortField);
+    setSortOrder(event.sortOrder);
+  };
+
+  const toggleStatus = async (row: DesignationRecord, value: boolean) => {
+    await designationApi.update(row.unique_id, {
+      designation_name: row.designation_name,
+      department_id: row.department_id ?? null,
+      description: row.description ?? "",
+      status: value ? "active" : "inactive",
+    });
+    await loadRows(
+      first / rowsPerPage + 1,
+      rowsPerPage,
+      searchTerm,
+      statusValue,
+      ordering,
+    );
+  };
+
+  const handleDelete = async (id: string | number) => {
+    const reason = await confirmDeleteWithReason({
+      title: "Are you sure?",
+      text: "This record will be permanently deleted!",
+    });
+    if (reason === null) return;
+
+    try {
+      await designationApi.delete(id, withDeleteReason(reason));
+      setRecords((current) => current.filter((item) => item.unique_id !== id));
+      Swal.fire({
+        icon: "success",
+        title: "Deleted successfully!",
+        timer: 1500,
+        showConfirmButton: false,
+      });
+    } catch {
+      Swal.fire("Error", "Failed to delete designation", "error");
+    }
+  };
+
+  // Feeds the table's single "Download Excel" button: "All data" is built
+  // server-side for the current filters, while "Current page" uses the rows
+  // already on screen.
+  const onServerExport = (filename: string, sheetName: string) =>
+    designationApi.exportToExcel(
+      {
+        params: {
+          ...(searchTerm ? { search: searchTerm } : {}),
+          ...(statusValue !== "all"
+            ? { is_active: statusValue === "active" }
+            : {}),
+        },
+      },
+      filename,
+      sheetName,
+    );
+
+  return (
+    <div className="min-h-full bg-gray-50/60 p-3 sm:p-5">
+      <div className="mb-4 flex min-w-0 flex-wrap items-start justify-between gap-3 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div className="min-w-0 flex-1">
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-blue-600">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50">
+              <i className="pi pi-id-card" />
+            </span>
+            Staff management
+          </div>
+          <h1 className="text-2xl font-semibold text-gray-900 mb-1">
+            Designation Master
+          </h1>
+          <p className="text-sm text-gray-500">Define roles and connect them to the right department.</p>
+        </div>
+        <Can action="add">
+          <Button
+            label="Add Designation"
+            icon="pi pi-plus"
+            className="p-button-success"
+            onClick={() => navigate(NEW_PATH)}
+          />
+        </Can>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+      <DataTable
+        filterPanel={combineFilters(statusFilter)}
+        header={<div className="border-b border-gray-100 bg-gray-50/70 p-3"><FilterBar
+          searchValue={globalFilterValue}
+          onSearchChange={onGlobalFilterChange}
+          searchPlaceholder="Search designations"
+        /></div>}
+        onServerExport={onServerExport}
+        value={records}
+        dataKey="unique_id"
+        lazy
+        paginator
+        first={first}
+        rows={rowsPerPage}
+        totalRecords={totalRecords}
+        onPage={onPage}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        onSort={onSort}
+        loading={isLoading}
+        stripedRows
+        showGridlines
+        className="p-datatable-sm"
+      >
+        <Column header="S.No" body={(_, opts) => opts.rowIndex + 1} />
+        <Column
+          field="designation_name"
+          header="Designation Name"
+          sortable={SORTABLE_FIELDS.has("designation_name")}
+        />
+        <Column field="department_name" header="Department" />
+        <Column field="description" header="Description" />
+        <Column
+          header="Status"
+          body={(row) => (
+            <Switch
+              checked={Boolean(row.is_active)}
+              disabled={!canEdit}
+              onCheckedChange={(value) => toggleStatus(row, value)}
+            />
+          )}
+        />
+        <Column
+          header="Action"
+          body={(row) => (
+            <div className="flex justify-center">
+              <ActionMenu
+                onEdit={() => navigate(editPath(row.unique_id))}
+                onDelete={() => void handleDelete(row.unique_id)}
+              />
+            </div>
+          )}
+        />
+      </DataTable>
+      </div>
+    </div>
+  );
+}

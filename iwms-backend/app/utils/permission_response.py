@@ -1,0 +1,757 @@
+import hashlib
+import json
+import re
+from types import SimpleNamespace
+
+from django.db.models import Q
+from django.utils import timezone
+
+from app.models.superadmin.screen_management.companyuserscreencolumnpermission import (
+    CompanyUserScreenColumnPermission,
+)
+from app.models.superadmin.screen_management.companyuserscreenpermission import CompanyUserScreenPermission
+from app.models.superadmin.screen_management.mainscreen import MainScreen
+from app.models.superadmin.screen_management.userscreen import UserScreen
+from app.models.superadmin.screen_management.userscreenaction import UserScreenAction
+from app.models.superadmin.screen_management.userscreencolumn import UserScreenColumn
+from app.models.superadmin.staff_management.staff_access_configuration import (
+    StaffAccessConfiguration,
+    StaffAccessConfigurationPermission,
+)
+from app.utils.app_feature_grants import (
+    APP_SURFACE_CONFIG as _APP_SURFACE_CONFIG,
+    APP_SURFACE_KEYS,
+    CITIZEN_APP_SCREENS,
+    SCREEN_PERMISSIONS,
+    visible_screens,
+)
+
+
+ACTION_KEYS = ("view", "add", "edit", "delete", "use", "import", "export")
+
+APP_SURFACE_CONFIG = _APP_SURFACE_CONFIG
+
+
+def base_action_map():
+    return {action: False for action in ACTION_KEYS}
+
+
+def normalize_permission_key(value):
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+
+
+def _ordered(rows):
+    """Rows sorted by order_no — a queryset is ordered in SQL, while a list
+    from preload_permission_rows() is already in order_no order."""
+    if hasattr(rows, "order_by"):
+        return rows.order_by("order_no")
+    return rows
+
+
+def _by_unique_id(model, ids):
+    ids = {i for i in ids if i}
+    if not ids:
+        return {}
+    return {obj.unique_id: obj for obj in model.objects.filter(unique_id__in=ids)}
+
+
+def preload_permission_rows(action_queryset, column_queryset):
+    """Materialize both permission querysets once, with their related
+    screens/actions/columns bulk-loaded.
+
+    The permission models store plain *_id CharFields and expose each
+    relation as a @property that runs its own query, so walking them in the
+    build_* functions below cost several queries per row — ~7,800 queries
+    (over a minute) for a platform superadmin's full catalog. This resolves
+    every relation from a handful of IN-queries and hands back lightweight
+    rows with the same attribute names the builders read.
+    """
+    actions = list(action_queryset.order_by("order_no"))
+    columns = list(column_queryset.order_by("order_no"))
+
+    userscreens = _by_unique_id(
+        UserScreen,
+        [a.userscreen_id for a in actions] + [c.userscreen_id for c in columns],
+    )
+    mainscreens = _by_unique_id(
+        MainScreen,
+        [a.mainscreen_id for a in actions] + [s.mainscreen_id for s in userscreens.values()],
+    )
+    screen_actions = _by_unique_id(UserScreenAction, [a.userscreenaction_id for a in actions])
+    screen_columns = _by_unique_id(UserScreenColumn, [c.column_id for c in columns])
+
+    screen_views = {
+        uid: SimpleNamespace(
+            unique_id=screen.unique_id,
+            userscreen_name=screen.userscreen_name,
+            folder_name=screen.folder_name,
+            order_no=screen.order_no,
+            mainscreen_id=screen.mainscreen_id,
+            mainscreen=mainscreens.get(screen.mainscreen_id),
+        )
+        for uid, screen in userscreens.items()
+    }
+
+    action_rows = [
+        SimpleNamespace(
+            mainscreen_id=a.mainscreen_id,
+            userscreen_id=a.userscreen_id,
+            order_no=a.order_no,
+            mainscreen=mainscreens.get(a.mainscreen_id),
+            userscreen=screen_views.get(a.userscreen_id),
+            userscreenaction=screen_actions.get(a.userscreenaction_id),
+        )
+        for a in actions
+    ]
+    column_rows = [
+        SimpleNamespace(
+            unique_id=c.unique_id,
+            company_id=c.company_id,
+            project_id=c.project_id,
+            userscreen_id=c.userscreen_id,
+            column_id=c.column_id,
+            can_view=c.can_view,
+            order_no=c.order_no,
+            userscreen=screen_views.get(c.userscreen_id),
+            column=screen_columns.get(c.column_id),
+        )
+        for c in columns
+    ]
+    return action_rows, column_rows
+
+
+def build_action_permissions(queryset):
+    permissions = {}
+    for perm in _ordered(queryset):
+        main_name = perm.mainscreen.mainscreen_name if perm.mainscreen else ""
+        screen_name = perm.userscreen.userscreen_name if perm.userscreen else ""
+        action_name = (
+            perm.userscreenaction.variable_name
+            or perm.userscreenaction.action_name
+            or ""
+        ).lower()
+
+        screen_map = permissions.setdefault(main_name, {})
+        actions = screen_map.setdefault(screen_name, [])
+        if action_name and action_name not in actions:
+            actions.append(action_name)
+
+    return permissions
+
+
+def build_permission_details(action_queryset, column_queryset=None):
+    details = {}
+    screen_meta = {}
+
+    for perm in _ordered(action_queryset):
+        main_name = perm.mainscreen.mainscreen_name if perm.mainscreen else ""
+        screen_name = perm.userscreen.userscreen_name if perm.userscreen else ""
+        action_name = (
+            perm.userscreenaction.variable_name
+            or perm.userscreenaction.action_name
+            or ""
+        ).lower()
+
+        screen_payload = details.setdefault(main_name, {}).setdefault(
+            screen_name,
+            {
+                "mainScreenId": perm.mainscreen_id,
+                "mainScreenName": main_name,
+                "mainScreenKey": normalize_permission_key(main_name),
+                "userScreenId": perm.userscreen_id,
+                "screenKey": normalize_permission_key(
+                    getattr(perm.userscreen, "folder_name", "") or screen_name
+                ),
+                "folderName": getattr(perm.userscreen, "folder_name", None),
+                "orderNo": getattr(perm.userscreen, "order_no", None),
+                "permissions": base_action_map(),
+                "columns": [],
+            },
+        )
+        screen_meta[perm.userscreen_id] = (main_name, screen_name)
+        if action_name in screen_payload["permissions"]:
+            screen_payload["permissions"][action_name] = True
+
+    if column_queryset is None:
+        from app.models.superadmin.screen_management.companyuserscreencolumnpermission import CompanyUserScreenColumnPermission
+        column_queryset = CompanyUserScreenColumnPermission.objects.none()
+
+    for column_permission in _ordered(column_queryset):
+        screen_id = column_permission.userscreen_id
+        if screen_id not in screen_meta:
+            main_name = column_permission.userscreen.mainscreen.mainscreen_name if column_permission.userscreen and column_permission.userscreen.mainscreen else ""
+            screen_name = column_permission.userscreen.userscreen_name if column_permission.userscreen else ""
+            screen_meta[screen_id] = (main_name, screen_name)
+            details.setdefault(main_name, {}).setdefault(
+                screen_name,
+                {
+                    "mainScreenId": column_permission.userscreen.mainscreen_id if column_permission.userscreen and column_permission.userscreen.mainscreen else None,
+                    "mainScreenName": main_name,
+                    "mainScreenKey": normalize_permission_key(main_name),
+                    "userScreenId": screen_id,
+                    "screenKey": normalize_permission_key(
+                        getattr(column_permission.userscreen, "folder_name", "")
+                        or screen_name
+                    ),
+                    "folderName": getattr(column_permission.userscreen, "folder_name", None),
+                    "orderNo": getattr(column_permission.userscreen, "order_no", None),
+                    "permissions": base_action_map(),
+                    "columns": [],
+                },
+            )
+
+        main_name, screen_name = screen_meta[screen_id]
+        column = column_permission.column
+        details[main_name][screen_name]["columns"].append({
+            "id": column.unique_id if column else None,
+            "columnId": column.unique_id if column else None,
+            "fieldName": column.field_name if column else "",
+            "displayName": column.display_name if column else "",
+            "dataType": column.data_type if column else "",
+            "dbColumn": column.db_column if column else "",
+            "canView": column_permission.can_view,
+            "isRequired": column.is_required if column else False,
+            "orderNo": column_permission.order_no,
+        })
+
+    return details
+
+
+def build_column_permissions(column_queryset):
+    grouped = {}
+    flat = []
+
+    for column_permission in _ordered(column_queryset):
+        userscreen = column_permission.userscreen
+        mainscreen = userscreen.mainscreen if userscreen else None
+        column = column_permission.column
+
+        payload = {
+            "uniqueId": column_permission.unique_id,
+            "companyId": column_permission.company_id,
+            "projectId": column_permission.project_id,
+            "mainScreenId": mainscreen.unique_id if mainscreen else None,
+            "mainScreenName": mainscreen.mainscreen_name if mainscreen else "",
+            "mainScreenKey": normalize_permission_key(mainscreen.mainscreen_name) if mainscreen else "",
+            "userScreenId": userscreen.unique_id if userscreen else None,
+            "userScreenName": userscreen.userscreen_name if userscreen else "",
+            "screenKey": normalize_permission_key(userscreen.folder_name or userscreen.userscreen_name) if userscreen else "",
+            "folderName": userscreen.folder_name if userscreen else None,
+            "columnId": column.unique_id if column else None,
+            "fieldName": column.field_name if column else "",
+            "displayName": column.display_name if column else "",
+            "dataType": column.data_type if column else "",
+            "dbColumn": column.db_column if column else "",
+            "canView": column_permission.can_view,
+            "isRequired": column.is_required if column else False,
+            "orderNo": column_permission.order_no,
+        }
+
+        flat.append(payload)
+        if mainscreen and userscreen:
+            grouped.setdefault(mainscreen.mainscreen_name, {}).setdefault(
+                userscreen.userscreen_name,
+                [],
+            ).append(payload)
+
+    return {
+        "grouped": grouped,
+        "flat": flat,
+    }
+
+
+def build_module_access(action_queryset, column_queryset=None):
+    modules = {}
+    screen_lookup = {}
+
+    for perm in _ordered(action_queryset):
+        mainscreen = perm.mainscreen
+        userscreen = perm.userscreen
+        action_name = (
+            perm.userscreenaction.variable_name
+            or perm.userscreenaction.action_name
+            or ""
+        ).lower()
+
+        module_entry = modules.setdefault(
+            mainscreen.unique_id if mainscreen else None,
+            {
+                "moduleId": mainscreen.unique_id if mainscreen else None,
+                "moduleName": mainscreen.mainscreen_name if mainscreen else "",
+                "moduleKey": normalize_permission_key(mainscreen.mainscreen_name) if mainscreen else "",
+                "orderNo": mainscreen.order_no if mainscreen else None,
+                "screens": {},
+            },
+        )
+
+        screen_entry = module_entry["screens"].setdefault(
+            userscreen.unique_id if userscreen else None,
+            {
+                "userScreenId": userscreen.unique_id if userscreen else None,
+                "screenName": userscreen.userscreen_name if userscreen else "",
+                "screenKey": normalize_permission_key(
+                    userscreen.folder_name or userscreen.userscreen_name
+                ) if userscreen else "",
+                "folderName": userscreen.folder_name if userscreen else None,
+                "orderNo": userscreen.order_no if userscreen else None,
+                "permissions": base_action_map(),
+                "columns": [],
+            },
+        )
+        screen_lookup[userscreen.unique_id] = screen_entry
+
+        if action_name in screen_entry["permissions"]:
+            screen_entry["permissions"][action_name] = True
+
+    if column_queryset is None:
+        from app.models.superadmin.screen_management.companyuserscreencolumnpermission import CompanyUserScreenColumnPermission
+        column_queryset = CompanyUserScreenColumnPermission.objects.none()
+
+    for column_permission in _ordered(column_queryset):
+        userscreen = column_permission.userscreen
+        mainscreen = userscreen.mainscreen if userscreen else None
+        module_entry = modules.setdefault(
+            mainscreen.unique_id if mainscreen else None,
+            {
+                "moduleId": mainscreen.unique_id if mainscreen else None,
+                "moduleName": mainscreen.mainscreen_name if mainscreen else "",
+                "moduleKey": normalize_permission_key(mainscreen.mainscreen_name) if mainscreen else "",
+                "orderNo": mainscreen.order_no if mainscreen else None,
+                "screens": {},
+            },
+        )
+        screen_entry = module_entry["screens"].setdefault(
+            userscreen.unique_id if userscreen else None,
+            {
+                "userScreenId": userscreen.unique_id if userscreen else None,
+                "screenName": userscreen.userscreen_name if userscreen else "",
+                "screenKey": normalize_permission_key(
+                    userscreen.folder_name or userscreen.userscreen_name
+                ) if userscreen else "",
+                "folderName": userscreen.folder_name if userscreen else None,
+                "orderNo": userscreen.order_no if userscreen else None,
+                "permissions": base_action_map(),
+                "columns": [],
+            },
+        )
+        
+        screen_lookup[userscreen.unique_id] = screen_entry
+
+        column = column_permission.column
+        if column is None:
+            continue
+        screen_entry["columns"].append(
+            {
+                "columnId": column.unique_id,
+                "fieldName": column.field_name,
+                "displayName": column.display_name,
+                "dbColumn": column.db_column,
+                "dataType": column.data_type,
+                "canView": column_permission.can_view,
+                "isRequired": column.is_required,
+                "orderNo": column_permission.order_no,
+            }
+        )
+
+    payload = []
+    for module in sorted(modules.values(), key=lambda item: item["orderNo"] or 0):
+        screens = sorted(
+            module["screens"].values(),
+            key=lambda item: item["orderNo"] or 0,
+        )
+        payload.append(
+            {
+                "moduleId": module["moduleId"],
+                "moduleName": module["moduleName"],
+                "moduleKey": module["moduleKey"],
+                "orderNo": module["orderNo"],
+                "screens": screens,
+            }
+        )
+    return payload
+
+
+def build_fallback_module_access(permissions):
+    module_access = []
+
+    for module_name, screens in sorted((permissions or {}).items()):
+        module_entry = {
+            "moduleId": None,
+            "moduleName": module_name,
+            "moduleKey": normalize_permission_key(module_name),
+            "orderNo": None,
+            "screens": [],
+        }
+
+        for screen_name, action_names in sorted((screens or {}).items()):
+            action_map = base_action_map()
+            for action_name in action_names or []:
+                normalized = normalize_permission_key(action_name)
+                if normalized in action_map:
+                    action_map[normalized] = True
+            module_entry["screens"].append(
+                {
+                    "userScreenId": None,
+                    "screenName": screen_name,
+                    "screenKey": normalize_permission_key(screen_name),
+                    "folderName": None,
+                    "orderNo": None,
+                    "permissions": action_map,
+                    "columns": [],
+                }
+            )
+
+        module_access.append(module_entry)
+
+    return module_access
+
+
+def surfaces_from_app_modules(app_modules):
+    """Surfaces for the app modules ticked on an access configuration.
+
+    This is the whole answer for the mobile app: a person may open the apps
+    they were ticked for, and no others. Nothing is inferred from a role name
+    or from which web screens they happen to hold, which is what used to hand
+    a driver an Admin tile because someone granted them the masters screens.
+    """
+    ordered = []
+    for surface in APP_SURFACE_KEYS:
+        if surface in (app_modules or []):
+            ordered.append(surface)
+    return ordered
+
+
+def infer_app_surfaces(
+    module_access,
+    permissions,
+    role_name=None,
+    user_type=None,
+    app_module=None,
+    app_modules=None,
+):
+    """The apps this user may open, most preferred first.
+
+    `app_modules` are the ticked App Module surfaces; `app_module` is the
+    default chosen on the creation form, used only to order them.
+    """
+    granted = surfaces_from_app_modules(app_modules)
+
+    if not granted:
+        # No module ticked. Web users are unaffected — they never consult this
+        # for anything but the admin landing route — but the mobile app is
+        # refused at login, so returning nothing here is correct.
+        role_key = normalize_permission_key(role_name)
+        user_type_key = normalize_permission_key(user_type)
+        is_web_admin = (
+            user_type_key in {"platform", "staff", "contractor"}
+            and any(token in role_key for token in ("admin", "superadmin", "platform"))
+        ) or user_type_key == "platform"
+        if is_web_admin:
+            return [{
+                "key": "admin",
+                "label": "Admin",
+                "route": "/admin/home",
+                "isDefault": True,
+            }]
+        return []
+
+    preferred = normalize_permission_key(app_module)
+    if preferred in granted:
+        granted.remove(preferred)
+        granted.insert(0, preferred)
+
+    surfaces = []
+    for index, key in enumerate(granted):
+        config = APP_SURFACE_CONFIG.get(key)
+        if not config:
+            continue
+        surfaces.append({
+            "key": key,
+            "label": config["label"],
+            "route": config["route"],
+            "isDefault": index == 0,
+        })
+    return surfaces
+
+
+def build_landing(app_surfaces, module_access):
+    if not app_surfaces:
+        return None
+
+    first_module = next(
+        (module for module in module_access if module.get("screens")),
+        None,
+    )
+    first_screen = None
+    if first_module:
+        first_screen = next(
+            (screen for screen in first_module.get("screens", []) if screen.get("permissions")),
+            None,
+        )
+
+    primary_surface = app_surfaces[0]
+    return {
+        "surfaceKey": primary_surface["key"],
+        "route": primary_surface["route"],
+        "moduleKey": first_module.get("moduleKey") if first_module else None,
+        "screenKey": first_screen.get("screenKey") if first_screen else None,
+    }
+
+
+def build_permission_version(
+    permissions,
+    column_permissions,
+    *,
+    app_modules=None,
+    app_screens=None,
+):
+    raw_payload = json.dumps(
+        {
+            "permissions": permissions or {},
+            "columns": (column_permissions or {}).get("flat", []),
+            "app_modules": app_modules or [],
+            "app_screens": app_screens or {},
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()[:16]
+
+
+def finalize_permission_payload(
+    payload,
+    *,
+    permissions=None,
+    role_name=None,
+    user_type=None,
+    app_module=None,
+    app_modules=None,
+):
+    effective_permissions = permissions if permissions is not None else payload.get("permissions", {})
+    if permissions is not None and effective_permissions != payload.get("permissions", {}):
+        module_access = build_fallback_module_access(effective_permissions)
+    else:
+        module_access = payload.get("module_access") or build_fallback_module_access(
+            effective_permissions
+        )
+
+    app_surfaces = infer_app_surfaces(
+        module_access,
+        effective_permissions,
+        role_name=role_name,
+        user_type=user_type,
+        app_module=app_module,
+        app_modules=app_modules if app_modules is not None else payload.get("app_modules"),
+    )
+
+    return {
+        **payload,
+        "permissions": effective_permissions,
+        "module_access": module_access,
+        "app_surfaces": app_surfaces,
+        "landing": build_landing(app_surfaces, module_access),
+        "permission_version": build_permission_version(
+            effective_permissions,
+            payload.get("column_permissions", {}),
+            app_modules=app_modules if app_modules is not None else payload.get("app_modules"),
+            app_screens=payload.get("app_screens"),
+        ),
+        "generated_at": timezone.now().isoformat(),
+    }
+
+
+def permission_querysets(
+    *,
+    company_unique_id=None,
+    staff_unique_id=None,
+    include_all=False,
+    **_unused,
+):
+    """
+    Resolve the effective (action_queryset, column_queryset) for a request.
+
+    - include_all=True: platform superadmin — the full CompanyUserScreenPermission
+      catalog across all companies/projects (column permissions are not scoped
+      by role anymore, so an empty queryset is returned for the "all" column view
+      since there is no single project to key it to).
+    - staff_unique_id given: resolve the staff's own StaffAccessConfiguration grant
+      (a subset of whatever their project's CompanyUserScreenPermission catalog
+      enabled). This is now the actual enforcement source for staff/contractor logins.
+    """
+    if include_all:
+        action_queryset = CompanyUserScreenPermission.objects.filter(
+            is_active=True,
+            is_deleted=False,
+        )
+        column_queryset = CompanyUserScreenColumnPermission.objects.filter(
+            is_active=True,
+            is_deleted=False,
+        )
+        return action_queryset, column_queryset
+
+    empty_action = StaffAccessConfigurationPermission.objects.none()
+    empty_column = CompanyUserScreenColumnPermission.objects.none()
+
+    if not staff_unique_id:
+        return empty_action, empty_column
+
+    config = (
+        StaffAccessConfiguration.objects.filter(
+            staff_id=staff_unique_id,
+            is_active=True,
+            is_deleted=False,
+        )
+        .first()
+    )
+    if not config:
+        return empty_action, empty_column
+
+    action_queryset = StaffAccessConfigurationPermission.objects.filter(
+        staff_access_configuration_id=config.unique_id,
+        is_active=True,
+        is_deleted=False,
+    )
+
+    column_queryset = CompanyUserScreenColumnPermission.objects.filter(
+        company_id=config.company_id,
+        userscreen_id__in=action_queryset.values_list("userscreen_id", flat=True),
+        is_active=True,
+        is_deleted=False,
+    )
+    # No projects configured => unrestricted access to every project under
+    # the company, so don't narrow by project at all. Otherwise include both
+    # the project-scoped rows AND the company-wide rows (project null) —
+    # a grant made at company level covers every project; without the null
+    # branch those columns silently vanish for project-scoped staff.
+    project_ids = config.get_project_ids()
+    if project_ids:
+        column_queryset = column_queryset.filter(
+            Q(project_id__in=project_ids) | Q(project_id__isnull=True)
+        )
+
+    return action_queryset, column_queryset
+
+
+def fallback_app_module(app_module):
+    """The surface named by an explicitly supplied `app_module`, or None.
+
+    Deliberately does NOT infer anything from a role name. A role called
+    "Company Supervisor" used to be enough on its own to return "supervisor",
+    which handed the Supervisor app to any staff member whose access
+    configuration did not exist yet — the login gate saw a non-empty
+    `app_modules` list and let them straight in, so an admin who had granted
+    nothing had in fact granted an app. The app is now only ever what
+    somebody explicitly selected.
+    """
+    preferred = normalize_permission_key(app_module)
+    return preferred if preferred in APP_SURFACE_KEYS else None
+
+
+def staff_access_config(staff_unique_id):
+    """The staff member's active access configuration, or None."""
+    if not staff_unique_id:
+        return None
+    return StaffAccessConfiguration.objects.filter(
+        staff_id=staff_unique_id,
+        is_active=True,
+        is_deleted=False,
+    ).first()
+
+
+def staff_app_modules(config):
+    """Surface key of the app selected on a StaffAccessConfiguration.
+
+    Returned as a list because the payload shape (`app_modules`, and
+    `app_screens` keyed by surface) is shared with customers and with older
+    app builds. A staff member belongs to exactly one app, so the list holds
+    at most one entry.
+    """
+    if config is None or not config.app_module_id:
+        return []
+    module = config.app_module
+    if not module or not module.is_active or module.is_deleted:
+        return []
+    return [module.surface_key]
+
+
+def resolve_permission_payload(**filters):
+    action_queryset, column_queryset = permission_querysets(**filters)
+    action_queryset, column_queryset = preload_permission_rows(action_queryset, column_queryset)
+    config = staff_access_config(filters.get("staff_unique_id"))
+
+    # ONE permission list, with no role-based defaults: the explicitly granted
+    # StaffAccessConfiguration rows (or, for platform superadmin, the full
+    # `include_all` catalog) are the whole of a user's access. No role name
+    # or screen ever gets permissions it wasn't explicitly given.
+    permissions = build_action_permissions(action_queryset)
+
+    app_modules = filters.get("app_modules")
+    if app_modules is None:
+        app_modules = staff_app_modules(config)
+        # The access configuration is the single source of a staff member's
+        # app. Staff reach this with `app_module` resolved from that same
+        # configuration (see the `Staffcreation.app_module` property), so an
+        # unconfigured staff member correctly falls through to no app and the
+        # login gate refuses their mobile sign-in. The fallback exists for
+        # customers on the legacy citizen path, who are passed a literal
+        # "citizen" before their CustomerAccessConfiguration is backfilled.
+        if not app_modules:
+            fallback = fallback_app_module(filters.get("app_module"))
+            app_modules = [fallback] if fallback else []
+
+    citizen_screens = filters.get("citizen_screens")
+    app_module = filters.get("app_module")
+
+    # Which mobile screens the app should render, derived from the same
+    # permissions the middleware enforces, so a visible tab and a 403 can
+    # never disagree.
+    screens = {}
+    for surface in app_modules:
+        screens[surface] = visible_screens(
+            permissions, surface, citizen_screens=citizen_screens
+        )
+
+    payload = {
+        "app_modules": app_modules,
+        "app_screens": screens,
+        "permission_details": build_permission_details(action_queryset, column_queryset),
+        "column_permissions": build_column_permissions(column_queryset),
+        "module_access": build_module_access(action_queryset, column_queryset),
+        "permissions": permissions,
+    }
+    # Multi-tenancy: the modules a company's projects use (and staff grants)
+    # add their IWMS screens (app/tenancy/screen_grants.py).
+    from app.tenancy.screen_grants import merge_permissions, tenancy_screen_grants
+
+    extra = tenancy_screen_grants(filters.get("staff_unique_id"))
+    if extra:
+        # ...and the fields the super admin enabled for the company on those screens.
+        from app.tenancy.screen_grants import merge_column_permissions, tenancy_column_rows
+
+        from app.models.superadmin.staff_management.staffcreation import Staffcreation
+
+        admin = Staffcreation.objects.filter(pk=filters.get("staff_unique_id")).first()
+        column_rows = tenancy_column_rows(filters.get("company_unique_id"), extra, staff=admin)
+        if column_rows is not None:
+            _, rows = preload_permission_rows(CompanyUserScreenPermission.objects.none(), column_rows)
+            payload["column_permissions"] = merge_column_permissions(
+                payload.get("column_permissions"), build_column_permissions(rows))
+    # Fields hidden for every company in the console's form settings.
+    from app.tenancy.context import get_current_tenant_db
+    from app.tenancy.router import per_db_mode
+
+    if per_db_mode() and get_current_tenant_db():
+        from app.tenancy.iwms_forms import apply_hidden_fields
+
+        payload["column_permissions"] = apply_hidden_fields(payload.get("column_permissions"))
+    return finalize_permission_payload(
+        payload,
+        permissions=merge_permissions(permissions, extra) if extra else None,
+        role_name=filters.get("role_name"),
+        user_type=filters.get("user_type"),
+        app_module=app_module,
+        app_modules=app_modules,
+    )

@@ -1,0 +1,238 @@
+import type { ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+
+import { PageLoader } from "@/components/ui/PageLoader";
+
+// Route-level code splitting: each page's chunk is only fetched when its
+// route is actually visited, instead of all of them shipping in the main
+// bundle up front. See adminRoutes.ts/dashboardRoutes.ts for the same
+// treatment applied to the much larger module route maps.
+const Auth = lazy(() => import("@/pages/Auth"));
+const ForgotPassword = lazy(() => import("@/pages/auth/ForgotPassword"));
+const VerifyOTP = lazy(() => import("@/pages/auth/VerifyOTP"));
+const ResetPassword = lazy(() => import("@/pages/auth/ResetPassword"));
+const LocalBodyAuth = lazy(() => import("@/pages/LocalBodyAuth"));
+const LocalBodyDashboard = lazy(() => import("@/pages/localbody/LocalBodyDashboard"));
+const DistrictAuth = lazy(() => import("@/pages/DistrictAuth"));
+const DistrictDashboard = lazy(() => import("@/pages/district/DistrictDashboard"));
+const Dashboard = lazy(() => import("@/pages/dashboard/pages/Dashboard"));
+const NotFound = lazy(() => import("@/pages/dashboard/pages/NotFound"));
+const DashboardHome = lazy(() => import("@/layouts/dashboard/DashboardHome"));
+const AdminDashboard = lazy(() => import("@/pages/admin/dashboards/AdminDashboard"));
+const SuperadminDashboard = lazy(() => import("@/pages/admin/dashboards/SuperadminDashboard"));
+const VehicleStatusDashboard = lazy(() => import("@/pages/admin/dashboards/vehicleStatus/VehicleStatusDashboard"));
+const AdminEncryptedRouter = lazy(() => import("@/layouts/admin/encryptedRouting/AdminEncryptedRouter"));
+const CommonAuditList = lazy(
+  () => import("@/pages/admin/modules/superadmin/audits/commonAudit/commonAuditList"),
+);
+const DailyTripLogReportPage = lazy(
+  () => import("@/pages/admin/modules/core_modules/dailyOperations/dailyTripLog/DailyTripLogReportPage"),
+);
+const DashboardEncryptedRouter = lazy(
+  () => import("@/layouts/dashboard/encryptedRouting/DashboardEncryptedRouter"),
+);
+// Multi-tenancy: super admin console and company workspaces (src/tenancy/).
+const TenancyRoot = lazy(() => import("@/tenancy/TenancyRoot"));
+const CompanyLogin = lazy(() => import("@/pages/CompanyAuth").then((m) => ({ default: m.CompanyLogin })));
+const CompanyEnter = lazy(() => import("@/pages/CompanyAuth").then((m) => ({ default: m.CompanyEnter })));
+const AdminLayout = lazy(() =>
+  import("@/layouts/admin/AdminLayout").then((m) => ({ default: m.AdminLayout })),
+);
+
+import { RoleBasedLayout } from "@/layouts/shared/RoleBasedLayout";
+import SessionIdleGuard from "@/components/auth/SessionIdleGuard";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
+import type { AdminViewMode, UserRole } from "@/types/roles";
+import {
+  ADMIN_ROLES,
+  DEFAULT_ROLE,
+  ADMIN_VIEW_MODE_ADMIN,
+  ADMIN_VIEW_MODE_DASHBOARD,
+  USER_ROLE_STORAGE_KEY,
+  getAdminViewPreference,
+  normalizeRole,
+  isAdmin,
+} from "@/types/roles";
+import { adminLandingPath, hasAnyPermission } from "@/utils/permissions";
+import { useDashboardMenuItems } from "@/layouts/dashboard/dashboardMenu";
+import { sessionStore } from "@/utils/sessionStore";
+import { getTabToken, setCompanySlug } from "@/utils/companyScope";
+
+const ADMIN_ACCESS_ROLES: UserRole[] = [DEFAULT_ROLE, ...ADMIN_ROLES];
+
+function withDashboard(children: ReactNode) {
+  return (
+    <ProtectedRoute>
+      <DashboardRouteGuard>
+        <RoleBasedLayout>{children}</RoleBasedLayout>
+      </DashboardRouteGuard>
+    </ProtectedRoute>
+  );
+}
+
+function withAdmin(children: ReactNode) {
+  return (
+    <ProtectedRoute allowedRoles={ADMIN_ACCESS_ROLES}>
+      <Suspense fallback={<PageLoader fullHeight />}>
+        <AdminLayout>{children}</AdminLayout>
+      </Suspense>
+    </ProtectedRoute>
+  );
+}
+
+function HomeRedirect() {
+  const { items: dashboardTabs } = useDashboardMenuItems();
+
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const storedRole = normalizeRole(sessionStore.getItem(USER_ROLE_STORAGE_KEY));
+  const preference = getAdminViewPreference();
+
+  if (isAdmin(storedRole, hasAnyPermission("view"))) {
+    // An admin without any User Dashboard tab stays in the admin panel.
+    if (preference === ADMIN_VIEW_MODE_DASHBOARD && dashboardTabs.length > 0) {
+      return <Navigate to="/dashboard" replace />;
+    }
+    return <Navigate to={adminLandingPath()} replace />;
+  }
+
+  const resolvedRole = storedRole ?? DEFAULT_ROLE;
+
+  if (resolvedRole === DEFAULT_ROLE) {
+    if (preference === ADMIN_VIEW_MODE_ADMIN) {
+      return <Navigate to={adminLandingPath()} replace />;
+    }
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  return <Navigate to="/dashboard" replace />;
+}
+
+function DashboardRouteGuard({ children }: { children: ReactNode }) {
+  const [role, setRole] = useState<UserRole | null>(null);
+  const [adminViewPreference, setAdminViewPreferenceState] = useState<AdminViewMode | null>(null);
+  const [checked, setChecked] = useState(false);
+  const { items: dashboardTabs } = useDashboardMenuItems();
+
+  useEffect(() => {
+    try {
+      const storedRole = normalizeRole(sessionStore.getItem(USER_ROLE_STORAGE_KEY));
+      setRole(storedRole);
+      setAdminViewPreferenceState(getAdminViewPreference());
+    } finally {
+      setChecked(true);
+    }
+  }, []);
+
+  if (!checked) {
+    return null;
+  }
+
+  const preference = adminViewPreference ?? ADMIN_VIEW_MODE_ADMIN;
+
+  if (isAdmin(role, hasAnyPermission("view")) && preference === ADMIN_VIEW_MODE_ADMIN) {
+    return <Navigate to={adminLandingPath()} replace />;
+  }
+
+  if (role === DEFAULT_ROLE && preference === ADMIN_VIEW_MODE_ADMIN) {
+    return <Navigate to={adminLandingPath()} replace />;
+  }
+
+  // Admins without any User Dashboard tab have no dashboard view to open.
+  if ((isAdmin(role, hasAnyPermission("view")) || role === DEFAULT_ROLE) && dashboardTabs.length === 0) {
+    return <Navigate to={adminLandingPath()} replace />;
+  }
+
+  return <>{children}</>;
+}
+
+// Multi-tenancy (one database per company):
+//   /superadmin/...      the super admin console (src/tenancy/)
+//   /<slug>/login, /<slug>  a company's sign-in: the IWMS screens, scoped to
+//                        that company (pages/CompanyAuth.tsx, utils/companyScope.ts)
+// Matched before the IWMS routes, not ranked with them, so "/<slug>/login"
+// never competes with "/:encMaster/:encModule". A first segment is a company
+// slug when it is not an IWMS route (backend RESERVED_SLUGS keeps companies
+// off these) and not an encrypted IWMS screen segment: CryptoJS AES output
+// always starts with "U2FsdGVkX1", which a lowercase slug never does.
+const IWMS_TOP_SEGMENTS = new Set(["", "auth", "admin", "dashboard", "district", "localbody", "audits", "api", "static", "media"]);
+
+function isSuperConsolePath(pathname: string) {
+  return pathname === "/superadmin" || pathname.startsWith("/superadmin/");
+}
+
+function companySlugOf(pathname: string): string | null {
+  const m = pathname.match(/^\/([a-z0-9-]{1,40})(\/login)?\/?$/);
+  if (!m || IWMS_TOP_SEGMENTS.has(m[1]) || m[1] === "superadmin") return null;
+  return m[1];
+}
+
+export default function App() {
+  const { pathname } = useLocation();
+  if (isSuperConsolePath(pathname)) {
+    return (
+      <Suspense fallback={<PageLoader fullHeight />}>
+        <TenancyRoot />
+      </Suspense>
+    );
+  }
+  if (companySlugOf(pathname)) {
+    return (
+      <Suspense fallback={null}>
+        <Routes>
+          <Route path="/:slug/login" element={<CompanyLogin />} />
+          <Route path="/:slug" element={<CompanyEnter />} />
+        </Routes>
+      </Suspense>
+    );
+  }
+  // The plain sign-in page signs in without a company in the URL: the backend
+  // finds the company from the username (as before multi-tenancy).
+  if (pathname === "/auth" && !getTabToken()) setCompanySlug(null);
+  // No loading card while a sign-in page downloads.
+  const onAuthPage = pathname.startsWith("/auth");
+  return (
+    <Suspense fallback={onAuthPage ? null : <PageLoader fullHeight />}>
+      <SessionIdleGuard />
+      <Routes>
+        {/* ── Public auth routes ── */}
+        <Route path="/auth" element={<Auth />} />
+        <Route path="/auth/forgot-password" element={<ForgotPassword />} />
+        <Route path="/auth/verify-otp" element={<VerifyOTP />} />
+        <Route path="/auth/reset-password" element={<ResetPassword />} />
+
+        {/* ── Panchayat / district leader portals ── */}
+        <Route path="/auth/localbody" element={<LocalBodyAuth />} />
+        <Route path="/localbody" element={<LocalBodyDashboard />} />
+        <Route path="/auth/district" element={<DistrictAuth />} />
+        <Route path="/district" element={<DistrictDashboard />} />
+
+        {/* ── Home redirect ── */}
+        {/* The site root opens the super admin console. Companies sign in at
+             /<slug>/login; only a super admin's "Open workspace" tab (which
+             reloads to "/") lands on that company's screens. */}
+        <Route path="/" element={getTabToken() ? <HomeRedirect /> : <Navigate to="/superadmin" replace />} />
+
+        {/* ── Staff / user dashboard ── */}
+        <Route path="/dashboard" element={withDashboard(<DashboardHome />)} />
+        <Route path="/dashboard/overview" element={withDashboard(<Dashboard />)} />
+        <Route path="/dashboard/:encModule" element={withDashboard(<DashboardEncryptedRouter />)} />
+
+        {/* ── Admin panel (Company Admin, superadmin, etc.) ── */}
+        <Route path="/admin" element={withAdmin(<AdminDashboard />)} />
+        <Route path="/admin/superadmin-dashboard" element={withAdmin(<SuperadminDashboard />)} />
+        <Route path="/admin/vehicle-status" element={withAdmin(<VehicleStatusDashboard />)} />
+        <Route path="/audits/common-audit" element={withAdmin(<CommonAuditList />)} />
+        <Route path="/:encMaster/:encModule" element={withAdmin(<AdminEncryptedRouter />)} />
+        <Route path="/:encMaster/:encModule/new" element={withAdmin(<AdminEncryptedRouter />)} />
+        <Route path="/:encMaster/:encModule/:id/edit" element={withAdmin(<AdminEncryptedRouter />)} />
+        <Route path="/:encMaster/:encModule/:id/report" element={withAdmin(<DailyTripLogReportPage />)} />
+
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </Suspense>
+  );
+}

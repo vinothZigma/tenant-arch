@@ -1,0 +1,462 @@
+/* eslint-disable react-hooks/set-state-in-effect */
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { companyApi, projectApi } from "@/helpers/admin";
+import { getCurrentCompanyUniqueId, getCurrentProjectId } from "@/utils/projectContext";
+import { USER_ROLE_STORAGE_KEY, normalizeRole } from "@/types/roles";
+import { getStoredProjects } from "@/utils/authStorage";
+import { setListCompanyProjectContext } from "@/utils/listQueryContext";
+import { sessionStore } from "@/utils/sessionStore";
+
+export type CompanyProjectOption = {
+  value: string;
+  label: string;
+};
+
+type LoginProfile = {
+  role?: string;
+  company_name?: string;
+  company?: {
+    name?: string;
+  };
+};
+
+type UseCompanyProjectSelectionArgs = {
+  isEdit: boolean;
+  initialCompanyId?: string;
+  initialProjectId?: string;
+  defaultToAll?: boolean;
+  /**
+   * Publish the selection as the list query context SafeDataTable reads.
+   * Off for useCompanyProjectFilter, whose selection is a Filters-panel draft
+   * that it publishes itself only once applied.
+   */
+  publishContext?: boolean;
+};
+
+const toStringId = (value: unknown): string => {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return toStringId(record.unique_id ?? record.id ?? record.value);
+  }
+  return String(value);
+};
+
+const toRecordList = (value: unknown): Record<string, unknown>[] => {
+  if (Array.isArray(value)) {
+    return value.filter(
+      (item): item is Record<string, unknown> =>
+        !!item && typeof item === "object" && !Array.isArray(item)
+    );
+  }
+
+  if (value && typeof value === "object") {
+    const maybeResults = (value as { results?: unknown }).results;
+    if (Array.isArray(maybeResults)) {
+      return maybeResults.filter(
+        (item): item is Record<string, unknown> =>
+          !!item && typeof item === "object" && !Array.isArray(item)
+      );
+    }
+  }
+
+  return [];
+};
+
+const readLoginProfile = (): LoginProfile | null => {
+  if (typeof window === "undefined") return null;
+
+  const raw = sessionStore.getItem("profile");
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw) as LoginProfile;
+  } catch {
+    return null;
+  }
+};
+
+export const useCompanyProjectSelection = ({
+  isEdit,
+  initialCompanyId,
+  initialProjectId,
+  defaultToAll = false,
+  publishContext = true,
+}: UseCompanyProjectSelectionArgs) => {
+  const [companyUniqueId, setCompanyUniqueId] = useState(
+    () => initialCompanyId || (defaultToAll ? "" : getCurrentCompanyUniqueId() ?? "")
+  );
+  const [projectId, setProjectId] = useState(initialProjectId || "");
+  const [apiCompanies, setApiCompanies] = useState<CompanyProjectOption[]>([]);
+  const [companiesLoaded, setCompaniesLoaded] = useState(false);
+  const [projects, setProjects] = useState<CompanyProjectOption[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+  // The company `projects` was loaded for. Right after the company changes,
+  // `projects`/`projectsLoaded` still describe the previous company for one
+  // render; compare against this before trusting the list.
+  const [projectsCompanyId, setProjectsCompanyId] = useState<string | null>(null);
+  const [resolvedLoggedInCompanyLabel, setResolvedLoggedInCompanyLabel] =
+    useState("");
+
+  const profile = useMemo(() => readLoginProfile(), []);
+  const loggedInCompanyUniqueIdRaw = useMemo(
+    () => getCurrentCompanyUniqueId(),
+    []
+  );
+  
+  const isSuperAdmin = useMemo(() => {
+    if (typeof window === "undefined") return false;
+
+    const roleFromStorage = normalizeRole(
+      sessionStore.getItem(USER_ROLE_STORAGE_KEY)
+    );
+    const roleFromProfile = normalizeRole(profile?.role);
+    const normalizedRole = roleFromStorage ?? roleFromProfile;
+    return normalizedRole === "superadmin" || normalizedRole === "super_admin";
+  }, [profile]);
+
+  const loggedInCompanyUniqueId = useMemo(() => {
+    if (isSuperAdmin) return "";
+    return loggedInCompanyUniqueIdRaw ?? "";
+  }, [isSuperAdmin, loggedInCompanyUniqueIdRaw]);
+
+  useEffect(() => {
+    if (!isSuperAdmin && loggedInCompanyUniqueId) {
+      setCompanyUniqueId((prev) => prev || loggedInCompanyUniqueId);
+    }
+  }, [isSuperAdmin, loggedInCompanyUniqueId]);
+
+  const profileCompanyLabel = useMemo(() => {
+    const directName =
+      typeof profile?.company_name === "string"
+        ? profile.company_name.trim()
+        : "";
+    const nestedName =
+      typeof profile?.company?.name === "string"
+        ? profile.company.name.trim()
+        : "";
+
+    return directName || nestedName || "";
+  }, [profile]);
+
+  useEffect(() => {
+    if (!loggedInCompanyUniqueIdRaw || profileCompanyLabel) {
+      return;
+    }
+
+    let active = true;
+
+    companyApi.read(loggedInCompanyUniqueIdRaw)
+      .then((company) => {
+        if (!active) return;
+
+        const name =
+          (typeof company?.name === "string" && company.name.trim()) ||
+          (typeof company?.company_name === "string" &&
+            company.company_name.trim()) ||
+          "";
+
+        setResolvedLoggedInCompanyLabel(name);
+      })
+      .catch(() => {
+        if (!active) return;
+        setResolvedLoggedInCompanyLabel("");
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [loggedInCompanyUniqueIdRaw, profileCompanyLabel]);
+
+  const loggedInCompanyLabel = useMemo(() => {
+    return (
+      profileCompanyLabel ||
+      resolvedLoggedInCompanyLabel ||
+      loggedInCompanyUniqueIdRaw ||
+      ""
+    );
+  }, [
+    profileCompanyLabel,
+    resolvedLoggedInCompanyLabel,
+    loggedInCompanyUniqueIdRaw,
+  ]);
+
+  const companies = useMemo<CompanyProjectOption[]>(() => {
+    if (!isSuperAdmin && loggedInCompanyUniqueId) {
+      return [
+        {
+          value: loggedInCompanyUniqueId,
+          label: loggedInCompanyLabel,
+        },
+      ];
+    }
+
+    if (isSuperAdmin && apiCompanies.length === 0 && loggedInCompanyUniqueIdRaw) {
+      return [
+        {
+          value: loggedInCompanyUniqueIdRaw,
+          label: loggedInCompanyLabel,
+        },
+      ];
+    }
+
+    if (!isSuperAdmin) {
+      return [];
+    }
+
+    return apiCompanies;
+  }, [
+    apiCompanies,
+    isSuperAdmin,
+    loggedInCompanyLabel,
+    loggedInCompanyUniqueId,
+    loggedInCompanyUniqueIdRaw,
+  ]);
+
+  useEffect(() => {
+    if (!isSuperAdmin) {
+      setCompaniesLoaded(true);
+      return;
+    }
+
+    setCompaniesLoaded(false);
+    // readAllForExport always walks every page regardless of whether companyApi
+    // has been put into server-list (paginated) mode by some other list page —
+    // this dropdown always needs the complete company list, not just one page.
+    companyApi
+      .readAllForExport()
+      .then((res) => {
+        const options: CompanyProjectOption[] = toRecordList(res).map((x) => ({
+          value: toStringId(x.unique_id),
+          label: String(x.name ?? ""),
+        }));
+
+        setApiCompanies(options);
+        if (!isEdit && !defaultToAll && options.length > 0) {
+          setCompanyUniqueId((prev) => prev || options[0].value);
+        }
+      })
+      .catch(() => {
+        setApiCompanies([]);
+      })
+      .finally(() => {
+        setCompaniesLoaded(true);
+      });
+  }, [defaultToAll, isEdit, isSuperAdmin]);
+
+  useEffect(() => {
+    setProjectsLoaded(false);
+    // Remembered with the list, so callers can tell a list that belongs to
+    // the current company from one still left over from the previous company.
+    const markProjectsLoaded = () => {
+      setProjectsCompanyId(companyUniqueId);
+      setProjectsLoaded(true);
+    };
+
+    // Non-superadmin: use only the projects from the login session
+    if (!isSuperAdmin) {
+      const sessionProjects = getStoredProjects();
+      const options: CompanyProjectOption[] = sessionProjects.map((p) => ({
+        value: p.unique_id,
+        label: p.name,
+      }));
+      setProjects(options);
+      setProjectId((prev) => {
+        if (prev && options.some((o) => o.value === prev)) return prev;
+        // Single project: always auto-select it, never leave on "All"
+        if (options.length === 1) return options[0].value;
+        return defaultToAll ? "" : options[0]?.value ?? "";
+      });
+      markProjectsLoaded();
+      return;
+    }
+
+    // Superadmin: fetch from API
+    if (!companyUniqueId) {
+      if (defaultToAll) {
+        let active = true;
+
+        // See companyApi.readAllForExport() note above — same reasoning.
+        projectApi
+          .readAllForExport()
+          .then((res) => {
+            if (!active) return;
+
+            const options: CompanyProjectOption[] = toRecordList(res).map((x) => ({
+              value: toStringId(x.unique_id),
+              label: String(x.name ?? ""),
+            }));
+
+            setProjects(options);
+            setProjectId((prev) =>
+              prev && options.some((option) => option.value === prev) ? prev : ""
+            );
+          })
+          .catch(() => {
+            if (!active) return;
+            setProjects([]);
+            setProjectId("");
+          })
+          .finally(() => {
+            if (!active) return;
+            markProjectsLoaded();
+          });
+
+        return () => {
+          active = false;
+        };
+      }
+
+      setProjects([]);
+      setProjectId("");
+      markProjectsLoaded();
+      return;
+    }
+
+    // For non-superadmin users, try to resolve the project list from the login
+    // cache first to avoid an extra API round-trip.
+    //
+    // Safety: only skip the API call when we know the staff's project ID
+    // (stored in the in-memory session after login).  If the project ID
+    // is not yet set (old session before this fix), we fall through to the API
+    // — the API itself is now scoped by the backend, so it also returns the
+    // correct result.
+    if (!isSuperAdmin) {
+      const staffProjectId = getCurrentProjectId();
+      if (staffProjectId) {
+        const storedProjects = getStoredProjects();
+        const scoped = storedProjects.filter((p) => p.unique_id === staffProjectId);
+        if (scoped.length > 0) {
+          const options: CompanyProjectOption[] = scoped.map((p) => ({
+            value: p.unique_id,
+            label: p.name,
+          }));
+          setProjects(options);
+          setProjectId((prev) => {
+            if (prev && options.some((option) => option.value === prev)) {
+              return prev;
+            }
+            return defaultToAll ? "" : (options[0]?.value ?? "");
+          });
+          markProjectsLoaded();
+          return;
+        }
+      }
+    }
+
+    let active = true;
+
+    // See companyApi.readAllForExport() note above — same reasoning.
+    projectApi
+      .readAllForExport({ params: { company_unique_id: companyUniqueId } })
+      .then((res) => {
+        if (!active) return;
+
+        const options: CompanyProjectOption[] = toRecordList(res).map((x) => ({
+          value: toStringId(x.unique_id),
+          label: String(x.name ?? ""),
+        }));
+
+        setProjects(options);
+
+        if (options.length === 0) {
+          setProjectId("");
+          return;
+        }
+
+        setProjectId((prev) => {
+          if (prev && options.some((option) => option.value === prev)) {
+            return prev;
+          }
+          return defaultToAll ? "" : options[0].value;
+        });
+      })
+      .catch(() => {
+        if (!active) return;
+
+        setProjects([]);
+        setProjectId("");
+      })
+      .finally(() => {
+        if (!active) return;
+        markProjectsLoaded();
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [companyUniqueId, defaultToAll, isSuperAdmin]);
+
+  const onCompanyChange = useCallback((value: string) => {
+    setCompanyUniqueId(value);
+    setProjects([]);
+    setProjectId("");
+  }, []);
+
+  const applyCompanyProjectFromRecord = useCallback(
+    (record: Record<string, unknown>) => {
+      const companyCandidate =
+        record.company_unique_id ??
+        record.company_id ??
+        ((record.company as Record<string, unknown> | undefined)?.unique_id ??
+          null);
+      const projectCandidate =
+        record.project_id ??
+        record.project_unique_id ??
+        ((record.project as Record<string, unknown> | undefined)?.unique_id ??
+          null);
+
+      const recordCompanyId = toStringId(companyCandidate);
+      if (recordCompanyId && (isSuperAdmin || !loggedInCompanyUniqueId)) {
+        setCompanyUniqueId(recordCompanyId);
+      }
+
+      // Only override projectId when the record actually has a project value.
+      // If the record has null/empty project (e.g. saved before project was required),
+      // keep whatever is already selected (e.g. from route state / initialProjectId).
+      const recordProjectId = toStringId(projectCandidate);
+      if (recordProjectId) {
+        setProjectId(recordProjectId);
+      }
+    },
+    [isSuperAdmin, loggedInCompanyUniqueId]
+  );
+
+  // Show "All Projects" only for superadmin or non-superadmin with multiple projects
+  const showAllProjectsOption = isSuperAdmin || projects.length > 1;
+
+  // Published during render, not in an effect: a list table below this page
+  // reads it while rendering and refetches from its own effect, which React
+  // runs *before* this (parent's) effect. Publishing in an effect left the
+  // table one step behind, e.g. "Clear filters" refetched with the old
+  // company/project. The write is idempotent, so a repeated render is harmless.
+  if (publishContext) {
+    setListCompanyProjectContext({ companyId: companyUniqueId, projectId });
+  }
+
+  useEffect(
+    () => () => {
+      if (publishContext) {
+        setListCompanyProjectContext({ companyId: "", projectId: "" });
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  return {
+    companyUniqueId,
+    projectId,
+    projects,
+    projectsLoaded,
+    projectsCompanyId,
+    companies,
+    companiesLoaded,
+    isSuperAdmin,
+    showAllProjectsOption,
+    loggedInCompanyUniqueId,
+    setProjectId,
+    onCompanyChange,
+    applyCompanyProjectFromRecord,
+  };
+};

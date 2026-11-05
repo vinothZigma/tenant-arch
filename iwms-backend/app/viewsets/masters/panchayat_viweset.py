@@ -1,0 +1,53 @@
+from rest_framework import filters, viewsets, status
+from app.models.masters.panchayat import Panchayat
+from app.serializers.masters.panchayat_serializer import PanchayatSerializer
+from rest_framework.response import Response
+from app.viewsets.superadmin_masters.company_scoped_viewset import CompanyScopedViewSet
+from app.utils.audit_mixin import AuditViewSetMixin
+from app.utils.location_scope_mixin import LocationScopedViewSetMixin
+from app.utils.pagination import LimitOffsetWithPage
+from app.utils.bulk_upload_mixin import BulkUploadMixin
+
+
+class PanhayatViewSet(BulkUploadMixin, AuditViewSetMixin, LocationScopedViewSetMixin, CompanyScopedViewSet):
+    location_scope_field = "panchayats"
+    location_scope_lookup = "unique_id"
+
+    serializer_class = PanchayatSerializer
+    lookup_field = "unique_id"
+    permission_resource = "Panchayat"
+
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    pagination_class = LimitOffsetWithPage
+    search_fields = ["panchayat_name"]
+    ordering_fields = ["panchayat_name", "is_active"]
+
+    AUDIT_MODULE = "masters"
+    AUDIT_ENDPOINT ="panchayat"
+
+    def get_queryset(self):
+        queryset = Panchayat.objects.filter(is_deleted=False)
+
+        company_uid = self.request.query_params.get("company_id")
+        project_uid = self.request.query_params.get("project_id")
+
+        if company_uid:
+            queryset = queryset.filter(company_id=company_uid)
+
+        if project_uid:
+            queryset = queryset.filter(project_id=project_uid)
+
+        district_uid = self.request.query_params.get("district") or self.request.query_params.get("district_id")
+        city_uid = self.request.query_params.get("city") or self.request.query_params.get("city_id")
+        state_uid = self.request.query_params.get("state") or self.request.query_params.get("state_id")
+
+        if district_uid:
+            queryset = queryset.filter(district_id=district_uid)
+
+        if city_uid:
+            queryset = queryset.filter(city_id=city_uid)
+
+        if state_uid:
+            queryset = queryset.filter(state_id=state_uid)
+
+        return self.filter_queryset_by_location_scope(queryset)

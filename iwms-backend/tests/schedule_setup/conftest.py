@@ -1,0 +1,196 @@
+"""Shared fixtures for schedule_setup trip-plan / daily-trip tests."""
+from datetime import time
+
+import pytest
+
+from app.models.masters.waste_masters.bins import Bins
+from app.models.masters.customer_masters.customercreation import CustomerCreation
+from app.models.masters.panchayat import Panchayat
+from app.models.core_modules.schedule_setup.collection_point import Collection_point
+from app.models.core_modules.schedule_setup.staff_template import StaffTemplate
+from app.models.core_modules.schedule_setup.trip_plan import TripPlan
+from app.models.core_modules.schedule_setup.trip_plan_collection_point import TripPlanCollectionPoint
+from app.models.masters.transport_masters.vehicleCreation import VehicleCreation
+from app.models.superadmin.staff_management.staffcreation import Staffcreation
+from app.models.waste_collection_bluetooth.waste_collection_bluetooth import WasteType
+from app.models.masters.waste_masters.property import Property
+from app.models.masters.waste_masters.subproperty import SubProperty
+
+
+@pytest.fixture
+def panchayat(db, company, project, state, district, city):
+    return Panchayat.objects.create(
+        panchayat_name="Auto-Assign Panchayat",
+        company_id=company.unique_id, project_id=project.unique_id,
+        state_id=state.unique_id, district_id=district.unique_id, city_id=city.unique_id,
+    )
+
+
+@pytest.fixture
+def panchayat_ward(db, state, district, city, panchayat):
+    from app.models.masters.ward import Ward
+    return Ward.objects.create(
+        ward_name="Auto-Assign Ward",
+        state_id=state.unique_id, district_id=district.unique_id, city_id=city.unique_id,
+        panchayat_id=panchayat.unique_id,
+    )
+
+
+@pytest.fixture
+def waste_type_obj(db):
+    return WasteType.objects.create(waste_type_name="General Waste")
+
+
+@pytest.fixture
+def driver(db, company, project):
+    return Staffcreation.objects.create(
+        employee_name="Driver One", company_id=company.unique_id, project_id=project.unique_id,
+    )
+
+
+@pytest.fixture
+def operator(db, company, project):
+    return Staffcreation.objects.create(
+        employee_name="Operator One", company_id=company.unique_id, project_id=project.unique_id,
+    )
+
+
+@pytest.fixture
+def supervisor(db, company, project):
+    return Staffcreation.objects.create(
+        employee_name="Supervisor One", company_id=company.unique_id, project_id=project.unique_id,
+    )
+
+
+@pytest.fixture
+def staff_template(db, company, project, driver, operator):
+    return StaffTemplate.objects.create(
+        company_id=company.unique_id, project_id=project.unique_id,
+        driver_id=driver.staff_unique_id, operator_id=operator.staff_unique_id,
+    )
+
+
+@pytest.fixture
+def vehicle(db, company, project):
+    return VehicleCreation.objects.create(
+        company_id=company.unique_id, project_id=project.unique_id,
+        vehicle_no="TN01AB1234",
+    )
+
+
+@pytest.fixture
+def collection_point(db, company, project, state, district, city, panchayat):
+    return Collection_point.objects.create(
+        cp_name="Auto-Assign CP",
+        company_id=company.unique_id, project_id=project.unique_id,
+        state_id=state.unique_id, city_id=city.unique_id, district_id=district.unique_id,
+        panchayat_id=panchayat.unique_id,
+        latitude="13.0827", longitude="80.2707",
+    )
+
+
+@pytest.fixture
+def bin_obj(db, company, project, district, city, collection_point, waste_type_obj):
+    return Bins.objects.create(
+        company_id=company.unique_id, project_id=project.unique_id,
+        district_id=district.unique_id, city_id=city.unique_id,
+        collection_point_id=collection_point.unique_id,
+        wastetype_id=waste_type_obj.unique_id,
+        bin_capacity=100,
+        bin_type="small",
+        bin_name="Auto-Assign Bin",
+        bin_image="",
+        bin_qr="",
+    )
+
+
+@pytest.fixture
+def prop(db):
+    return Property.objects.create(property_name="Residential")
+
+
+@pytest.fixture
+def sub_prop(db, prop):
+    return SubProperty.objects.create(sub_property_name="Apartment", property_id=prop)
+
+
+@pytest.fixture
+def household_customer(db, company, project, continent, country, state, district, city, zone, ward, panchayat, prop, sub_prop):
+    return CustomerCreation.objects.create(
+        customer_name="Household Customer",
+        contact_no="9876500001",
+        pincode="600001",
+        latitude="13.0827",
+        longitude="80.2707",
+        id_proof_type="Aadhar",
+        id_no="1111-2222-3333",
+        company_id=company.unique_id, project_id=project.unique_id,
+        country_id=country.unique_id, state_id=state.unique_id, district_id=district.unique_id,
+        city_id=city.unique_id, zone_id=zone.unique_id, ward_id=ward.unique_id,
+        panchayat_id=panchayat.unique_id,
+        property_id=prop.unique_id, sub_property_id=sub_prop.unique_id,
+        is_bulkwaste_generator=False,
+    )
+
+
+@pytest.fixture
+def bulk_customer(db, company, project, continent, country, state, district, city, zone, ward, panchayat, prop, sub_prop):
+    return CustomerCreation.objects.create(
+        customer_name="Bulk Customer",
+        contact_no="9876500002",
+        pincode="600001",
+        latitude="13.0827",
+        longitude="80.2707",
+        id_proof_type="Aadhar",
+        id_no="4444-5555-6666",
+        company_id=company.unique_id, project_id=project.unique_id,
+        country_id=country.unique_id, state_id=state.unique_id, district_id=district.unique_id,
+        city_id=city.unique_id, zone_id=zone.unique_id, ward_id=ward.unique_id,
+        panchayat_id=panchayat.unique_id,
+        property_id=prop.unique_id, sub_property_id=sub_prop.unique_id,
+        is_bulkwaste_generator=True,
+    )
+
+
+def _make_plan(company, project, district, city, panchayat, staff_template, vehicle,
+                supervisor, waste_type_obj, collection_type=TripPlan.COLLECTION_TYPE_BIN,
+                is_auto_assign=True, repeat_days=None, approval_status=TripPlan.ApprovalStatus.APPROVED,
+                status=TripPlan.Status.ACTIVE):
+    return TripPlan.objects.create(
+        company_id=company.unique_id, project_id=project.unique_id,
+        district_id=district.unique_id, city_id=city.unique_id,
+        panchayat_id=panchayat.unique_id,
+        staff_template_id=staff_template.unique_id,
+        vehicle_id=vehicle.unique_id,
+        supervisor_id=supervisor.staff_unique_id,
+        waste_type_id=waste_type_obj.unique_id,
+        waste_type_ids=[waste_type_obj.unique_id],
+        trip_trigger_weight_kg=800,
+        max_vehicle_capacity_kg=3000,
+        scheduled_time=time(6, 0),
+        collection_type=collection_type,
+        is_auto_assign=is_auto_assign,
+        repeat_days=repeat_days if repeat_days is not None else [],
+        approval_status=approval_status,
+        status=status,
+    )
+
+
+@pytest.fixture
+def bin_plan(db, company, project, district, city, panchayat, staff_template, vehicle, supervisor, waste_type_obj):
+    return _make_plan(
+        company, project, district, city, panchayat, staff_template, vehicle,
+        supervisor, waste_type_obj, collection_type=TripPlan.COLLECTION_TYPE_BIN,
+    )
+
+
+@pytest.fixture
+def bin_stop(db, bin_plan, collection_point, bin_obj):
+    return TripPlanCollectionPoint.objects.create(
+        trip_plan_id=bin_plan.unique_id,
+        collection_type=TripPlanCollectionPoint.COLLECTION_TYPE_BIN,
+        collection_point_id=collection_point.unique_id,
+        bin_id=bin_obj.unique_id,
+        sequence=1,
+        is_active=True,
+    )

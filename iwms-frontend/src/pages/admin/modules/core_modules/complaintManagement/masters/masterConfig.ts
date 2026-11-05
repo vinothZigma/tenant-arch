@@ -1,0 +1,173 @@
+import {
+  complaintModuleApi,
+  complaintPriorityApi,
+  complaintSourceApi,
+  complaintStatusApi,
+} from "@/features/complaintTicketing/api";
+// Category / Sub-category / SLA are global configuration owned by the
+// superadmin-only "complaint-masters" module. The `complaint-ticket/*` twins
+// of these tables are view-only (see MODULE_READONLY_RESOURCES in
+// module_permission_middleware.py), so the screens that EDIT them must call
+// the `complaint-masters/*` paths or every save would 403.
+import {
+  complaintMasterCategoryApi,
+  complaintMasterSlaRuleApi,
+  complaintMasterSubcategoryApi,
+} from "@/features/complaintMasters/api";
+import { getEncryptedRoute } from "@/utils/routeCache";
+
+/**
+ * Single source of truth for the 7 "reference data" master kinds that share
+ * the generic `MasterForm`/`MasterList` engine (module, category,
+ * subcategory, priority, status, source, slaRule).
+ *
+ * Before this file, `MasterForm.tsx` and `MasterList.tsx` each kept their own
+ * copy of `title`/`routeModule`/`api` lookup maps — nearly identical, but
+ * free to drift out of sync. This is the one place that per-kind metadata
+ * lives now; both components (and the merged Reference Data / Category
+ * screens) read from it instead of hard-coding their own copies.
+ *
+ * Field-level form JSX (which dropdowns appear, category-filtered
+ * subcategory pickers, self-excluding "escalates to", etc.) stays inline in
+ * `MasterForm.tsx` — those differ enough per kind (and carry real relational
+ * logic) that forcing them through a declarative schema here would trade a
+ * small amount of duplication for a much larger risk of subtle behavioural
+ * regressions.
+ */
+export type MasterKind =
+  | "module"
+  | "category"
+  | "subcategory"
+  | "priority"
+  | "status"
+  | "source"
+  | "slaRule";
+
+export type MasterColumn = {
+  field: string;
+  header: string;
+  sortable?: boolean;
+  /** Render the field through `yesNo()` instead of showing the raw value. */
+  render?: "yesno";
+};
+
+export type MasterConfigEntry = {
+  /** Singular label, e.g. "Complaint Module" (used on the form). */
+  title: string;
+  /** Plural label, e.g. "Complaint Modules" (used on the list). */
+  titlePlural: string;
+  api: () => typeof complaintModuleApi;
+  /** Which `getEncryptedRoute()` key resolves this kind's URL segment. */
+  routeKey: keyof ReturnType<typeof getEncryptedRoute>;
+  /** Global-search fields for the list's search box. */
+  searchFields: string[];
+  /** Table columns, in addition to the S.No/Active/Actions columns every kind gets. */
+  columns: MasterColumn[];
+};
+
+export const MASTER_CONFIG: Record<MasterKind, MasterConfigEntry> = {
+  module: {
+    title: "Complaint Module",
+    titlePlural: "Complaint Modules",
+    api: () => complaintModuleApi,
+    routeKey: "encComplaintModules",
+    searchFields: ["module_code", "module_name"],
+    columns: [
+      { field: "module_code", header: "Code", sortable: true },
+      { field: "module_name", header: "Module", sortable: true },
+    ],
+  },
+  category: {
+    title: "Complaint Category",
+    titlePlural: "Complaint Categories",
+    api: () => complaintMasterCategoryApi,
+    routeKey: "encComplaintCategories",
+    searchFields: ["category_code", "category_name", "module_name", "default_priority_code", "default_department_name"],
+    columns: [
+      { field: "category_code", header: "Code", sortable: true },
+      { field: "category_name", header: "Category", sortable: true },
+      { field: "module_name", header: "Module" },
+      { field: "default_priority_code", header: "Default Priority" },
+      { field: "default_department_name", header: "Default Department" },
+    ],
+  },
+  subcategory: {
+    title: "Complaint Subcategory",
+    titlePlural: "Complaint Subcategories",
+    api: () => complaintMasterSubcategoryApi,
+    routeKey: "encComplaintSubcategories",
+    searchFields: ["subcategory_code", "subcategory_name", "category_name"],
+    columns: [
+      { field: "subcategory_code", header: "Code", sortable: true },
+      { field: "subcategory_name", header: "Subcategory", sortable: true },
+      { field: "category_name", header: "Category", sortable: true },
+    ],
+  },
+  priority: {
+    title: "Complaint Priority",
+    titlePlural: "Priorities",
+    api: () => complaintPriorityApi,
+    routeKey: "encComplaintPriorities",
+    searchFields: ["priority_code", "priority_name"],
+    columns: [
+      { field: "priority_code", header: "Code", sortable: true },
+      { field: "priority_name", header: "Priority", sortable: true },
+    ],
+  },
+  status: {
+    title: "Complaint Status",
+    titlePlural: "Statuses",
+    api: () => complaintStatusApi,
+    routeKey: "encComplaintStatuses",
+    searchFields: ["status_code", "status_name"],
+    columns: [
+      { field: "status_code", header: "Code", sortable: true },
+      { field: "status_name", header: "Status", sortable: true },
+      { field: "is_final", header: "Final", render: "yesno" },
+      { field: "allow_reopen", header: "Allow Reopen", render: "yesno" },
+    ],
+  },
+  source: {
+    title: "Complaint Source",
+    titlePlural: "Sources",
+    api: () => complaintSourceApi,
+    routeKey: "encComplaintSources",
+    searchFields: ["source_code", "source_name"],
+    columns: [
+      { field: "source_code", header: "Code", sortable: true },
+      { field: "source_name", header: "Source", sortable: true },
+    ],
+  },
+  slaRule: {
+    title: "Complaint SLA Rule",
+    titlePlural: "SLA Rules",
+    api: () => complaintMasterSlaRuleApi,
+    routeKey: "encComplaintSlaRules",
+    searchFields: ["category_code", "priority_code", "subcategory_code"],
+    columns: [
+      { field: "category_code", header: "Category", sortable: true },
+      { field: "subcategory_code", header: "Sub Category" },
+      { field: "priority_code", header: "Priority", sortable: true },
+      { field: "working_hours_only", header: "Working Hours", render: "yesno" },
+    ],
+  },
+};
+
+/** The 4 "Tier A" masters merged into the single Reference Data screen. */
+export const REFERENCE_DATA_KINDS: MasterKind[] = ["module", "priority", "source", "status"];
+
+/**
+ * The 3 kinds that make up a complaint type, shown as tabs on the SUPER ADMIN
+ * "Complaint Types" screen. Order is the dependency order a superadmin
+ * configures them in: a category first, then its sub-categories, then its SLA.
+ */
+export const COMPLAINT_TYPE_KINDS = ["category", "subcategory", "slaRule"] as const;
+
+export type ComplaintTypeKind = (typeof COMPLAINT_TYPE_KINDS)[number];
+
+/** Tab label per kind on the Complaint Types screen. */
+export const COMPLAINT_TYPE_TAB_META: Record<ComplaintTypeKind, { label: string }> = {
+  category: { label: "Category" },
+  subcategory: { label: "Sub Category" },
+  slaRule: { label: "SLA" },
+};

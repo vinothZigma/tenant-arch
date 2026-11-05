@@ -1,0 +1,90 @@
+"""Daily waste collection analytics backed by confirmed DailyTripLog rows."""
+from rest_framework.response import Response
+
+from app.models.core_modules.daily_operations.daily_trip_log import DailyTripLog
+from app.models.reports.waste_reports.daily_waste_comparison import DailyWasteComparison
+from app.serializers.reports.waste_reports.daily_waste_comparison_serializer import (
+    DailyWasteComparisonSerializer,
+)
+from app.utils.waste_collection_report import build_waste_collection_report
+from app.viewsets.superadmin_masters.company_scoped_viewset import CompanyScopedViewSet
+
+
+def _comma_values(value):
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+class DailyWasteComparisonViewSet(CompanyScopedViewSet):
+    permission_resource = "DailyWasteComparison"
+    queryset = DailyWasteComparison.objects.all()
+    serializer_class = DailyWasteComparisonSerializer
+    lookup_field = "unique_id"
+
+    def list(self, request):
+        queryset = DailyTripLog.objects.filter(is_deleted=False)
+        queryset = self.filter_queryset(queryset)
+
+        date_value = request.query_params.get("date")
+        month_value = request.query_params.get("month")
+        # date_from / date_to: optional inclusive range (either end may be open)
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+        date_filter = None
+        if date_value:
+            queryset = queryset.filter(trip_date=date_value)
+            date_filter = {"collection_date": date_value}
+        elif date_from or date_to:
+            date_filter = {}
+            if date_from:
+                queryset = queryset.filter(trip_date__gte=date_from)
+                date_filter["collection_date__gte"] = date_from
+            if date_to:
+                queryset = queryset.filter(trip_date__lte=date_to)
+                date_filter["collection_date__lte"] = date_to
+        elif month_value:
+            try:
+                year, month = month_value.split("-")
+                queryset = queryset.filter(
+                    trip_date__year=int(year), trip_date__month=int(month)
+                )
+                date_filter = {
+                    "collection_date__year": int(year),
+                    "collection_date__month": int(month),
+                }
+            except (TypeError, ValueError):
+                pass
+
+        panchayat_ids = _comma_values(request.query_params.get("panchayat_id"))
+        zone_ids = _comma_values(request.query_params.get("zone_id"))
+        # Panchayat and zone selections combine with OR — a row is only ever
+        # panchayat-based (bin trips) or zone-based (household trips), never
+        # both, so filtering must accept either kind of location the user picks.
+        if panchayat_ids or zone_ids:
+            from django.db.models import Q
+
+            location_filter = Q()
+            if panchayat_ids:
+                location_filter |= Q(panchayat_id__in=panchayat_ids)
+            if zone_ids:
+                location_filter |= Q(zone_id__in=zone_ids)
+            queryset = queryset.filter(location_filter)
+
+        waste_type_id = request.query_params.get("waste_type_id")
+        if waste_type_id:
+            # Retains the existing endpoint's primary-waste-type filter.
+            queryset = queryset.filter(waste_type_id=waste_type_id)
+
+        payload = build_waste_collection_report(
+            queryset,
+            source=request.query_params.get("source", "bin").lower(),
+            waste_type_id=waste_type_id,
+            sort=request.query_params.get("sort", "weight").lower(),
+            page=request.query_params.get("page"),
+            limit=request.query_params.get("limit"),
+            company_id=request.query_params.get("company_id"),
+            project_id=request.query_params.get("project_id"),
+            panchayat_ids=panchayat_ids or None,
+            zone_ids=zone_ids or None,
+            date_filter=date_filter,
+        )
+        return Response(payload)

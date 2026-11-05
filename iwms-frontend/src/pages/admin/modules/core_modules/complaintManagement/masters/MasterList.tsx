@@ -1,0 +1,397 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import Swal from "@/lib/notify";
+import { confirmDeleteWithReason, withDeleteReason } from "@/utils/deleteReason";
+import { DataTable } from "@/components/common/SafeDataTable";
+import { Column } from "primereact/column";
+import { Button } from "primereact/button";
+import { FilterBar } from "@/components/common/FilterBar";
+import type {
+  DataTablePageEvent,
+  DataTableSortEvent,
+  SortOrder,
+} from "primereact/datatable";
+import { ActionMenu } from "@/components/ui/ActionMenu";
+import { createCrudRoutePaths } from "@/utils/routePaths";
+import { getEncryptedRoute } from "@/utils/routeCache";
+import { asArray, errorText, yesNo } from "../utils";
+import { MASTER_CONFIG, type MasterKind } from "./masterConfig";
+import { useScreenAccess } from "@/contexts/screenPermission";
+
+type Props = {
+  kind: MasterKind;
+  /**
+   * Which module segment the Add/Edit routes are built under. Defaults to
+   * `complaint-ticket` so every existing route keeps working; the SUPER ADMIN
+   * Complaint Types screen passes `complaint-masters` so its rows link to the
+   * writable superadmin routes instead of the view-only Desk ones.
+   */
+  moduleSegment?: string;
+  /** Hide the built-in heading when the parent screen already renders one. */
+  hideHeading?: boolean;
+};
+
+// Mirrors the `ordering_fields` configured on each backend viewset, intersected
+// with the fields that are actually rendered as visible columns below. Related-object
+// display fields (e.g. module_name, category_name, default_priority_code/
+// default_department_name, and the slaRule category_code/priority_code
+// lookups) are not safely orderable and are intentionally left out.
+const SORTABLE_FIELDS_BY_KIND: Record<MasterKind, Set<string>> = {
+  module: new Set(["module_code"]),
+  category: new Set(["category_code"]),
+  subcategory: new Set(["subcategory_code"]),
+  priority: new Set(["priority_code"]),
+  status: new Set(["status_code"]),
+  source: new Set(["source_code", "source_name"]),
+  slaRule: new Set([]),
+};
+
+export default function MasterList({ kind, moduleSegment, hideHeading }: Props) {
+  const navigate = useNavigate();
+  const routes = getEncryptedRoute();
+  const config = MASTER_CONFIG[kind];
+  const { canAdd } = useScreenAccess();
+  const { newPath, editPath } = createCrudRoutePaths(
+    moduleSegment ?? routes.encComplaintTicket,
+    routes[config.routeKey],
+  );
+
+  const [rows, setRows] = useState<any[]>([]);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [first, setFirst] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [isLoading, setIsLoading] = useState(false);
+  const [query, setQuery] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortField, setSortField] = useState<string | undefined>(undefined);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(undefined);
+
+  const api = useMemo(() => config.api(), [config]);
+
+  // Switching kind should restart pagination (and drop any sort tied to the old kind's columns).
+  useEffect(() => {
+    setFirst(0);
+  }, [kind]);
+
+  const ordering =
+    sortField && SORTABLE_FIELDS_BY_KIND[kind].has(sortField)
+      ? `${sortOrder === -1 ? "-" : ""}${sortField}`
+      : undefined;
+
+  const loadRows = async (
+    page: number,
+    limit: number,
+    search: string,
+    sortOrdering?: string,
+  ) => {
+    setIsLoading(true);
+    try {
+      const response = await api.readAllwithPaginated(page, limit, {
+        params: {
+          ...(search ? { search } : {}),
+          ...(sortOrdering ? { ordering: sortOrdering } : {}),
+        },
+      });
+      setRows(asArray(response));
+      setTotalRecords(
+        typeof (response as any)?.count === "number"
+          ? (response as any).count
+          : asArray(response).length,
+      );
+    } catch (error) {
+      Swal.fire("Error", errorText(error, "Unable to load records"), "error");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRows(first / rowsPerPage + 1, rowsPerPage, searchTerm, ordering);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, first, rowsPerPage, searchTerm, ordering]);
+
+  const onPage = (event: DataTablePageEvent) => {
+    setFirst(event.first);
+    setRowsPerPage(event.rows);
+  };
+
+  const onSort = (event: DataTableSortEvent) => {
+    setFirst(0);
+    setSortField(event.sortField);
+    setSortOrder(event.sortOrder);
+  };
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setFirst(0);
+      setSearchTerm(query);
+    }, 400);
+    return () => clearTimeout(timeout);
+  }, [query, kind]);
+
+  const edit = (row: any) => navigate(editPath(row.unique_id));
+
+  const handleDelete = async (row: any) => {
+    const reason = await confirmDeleteWithReason({
+      title: "Are you sure?",
+      text: "This record will be permanently deleted!",
+    });
+    if (reason === null) return;
+
+    try {
+      await api.delete(row.unique_id, withDeleteReason(reason));
+      setRows((current) => current.filter((item) => item.unique_id !== row.unique_id));
+      Swal.fire({
+        icon: "success",
+        title: "Deleted successfully!",
+        timer: 1500,
+        showConfirmButton: false,
+      });
+    } catch (error) {
+      Swal.fire("Error", errorText(error, "Unable to delete record"), "error");
+    }
+  };
+
+  // "All data" is exported on the server with the active search, since the
+  // table is lazily paginated and only holds one page.
+  const serverExport = (filename: string, sheetName: string) =>
+    api.exportToExcel(
+      { params: { ...(searchTerm ? { search: searchTerm } : {}) } },
+      filename,
+      sheetName,
+    );
+
+  return (
+    <div className="p-3">
+      <div className="mb-6 flex min-w-0 flex-wrap items-start justify-between gap-3 gap-4">
+        <div className="min-w-0 flex-1">
+          {!hideHeading && (
+            <>
+              <h1 className="text-2xl font-semibold text-gray-800">
+                {config.titlePlural}
+              </h1>
+              <p className="text-sm text-gray-500">Complaint ticketing setup</p>
+            </>
+          )}
+        </div>
+        {canAdd && (
+          <Button
+            label="Add New"
+            icon="pi pi-plus"
+            className="p-button-success"
+            onClick={() => navigate(newPath)}
+          />
+        )}
+      </div>
+      <DataTable
+        onServerExport={serverExport}
+        value={rows}
+        dataKey="unique_id"
+        lazy
+        paginator
+        first={first}
+        rows={rowsPerPage}
+        totalRecords={totalRecords}
+        onPage={onPage}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        onSort={onSort}
+        rowsPerPageOptions={[5, 10, 25, 50]}
+        loading={isLoading}
+        header={
+          <FilterBar
+            searchValue={query}
+            onSearchChange={setQuery}
+            searchPlaceholder="Search"
+          />
+        }
+        emptyMessage="No records found"
+        stripedRows
+        showGridlines
+        fitWidth
+        className="p-datatable-sm"
+      >
+        <Column
+          header="S.No"
+          body={(_, options) => options.rowIndex + 1}
+          style={{ width: "5%" }}
+        />
+        {kind === "module" && (
+          <Column
+            field="module_code"
+            header="Code"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("module_code")}
+          />
+        )}
+        {kind === "module" && (
+          <Column
+            field="module_name"
+            header="Module"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("module_name")}
+          />
+        )}
+        {kind === "category" && (
+          <Column
+            field="category_code"
+            header="Code"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("category_code")}
+          />
+        )}
+        {kind === "category" && (
+          <Column
+            field="category_name"
+            header="Category"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("category_name")}
+          />
+        )}
+        {kind === "category" && (
+          <Column
+            field="module_name"
+            header="Module"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("module_name")}
+          />
+        )}
+        {kind === "category" && (
+          <Column field="default_priority_code" header="Default Priority" />
+        )}
+        {kind === "category" && (
+          <Column field="default_department_name" header="Default Department" />
+        )}
+        {kind === "subcategory" && (
+          <Column
+            field="subcategory_code"
+            header="Code"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("subcategory_code")}
+          />
+        )}
+        {kind === "subcategory" && (
+          <Column
+            field="subcategory_name"
+            header="Subcategory"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("subcategory_name")}
+          />
+        )}
+        {kind === "subcategory" && (
+          <Column
+            field="category_name"
+            header="Category"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("category_name")}
+          />
+        )}
+        {kind === "priority" && (
+          <Column
+            field="priority_code"
+            header="Code"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("priority_code")}
+          />
+        )}
+        {kind === "priority" && (
+          <Column
+            field="priority_name"
+            header="Priority"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("priority_name")}
+          />
+        )}
+        {kind === "status" && (
+          <Column
+            field="status_code"
+            header="Code"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("status_code")}
+          />
+        )}
+        {kind === "status" && (
+          <Column
+            field="status_name"
+            header="Status"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("status_name")}
+          />
+        )}
+        {kind === "status" && (
+          <Column header="Final" body={(row) => yesNo(row.is_final)} />
+        )}
+        {kind === "status" && (
+          <Column
+            header="Allow Reopen"
+            body={(row) => yesNo(row.allow_reopen)}
+          />
+        )}
+        {kind === "source" && (
+          <Column
+            field="source_code"
+            header="Code"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("source_code")}
+          />
+        )}
+        {kind === "source" && (
+          <Column
+            field="source_name"
+            header="Source"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("source_name")}
+          />
+        )}
+        {kind === "slaRule" && (
+          <Column
+            field="category_code"
+            header="Category"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("category_code")}
+          />
+        )}
+        {kind === "slaRule" && (
+          <Column
+            header="Sub Category"
+            // A rule scoped to the whole category leaves `subcategory` NULL,
+            // which means "applies to every sub-category" — show that as
+            // "All" rather than an empty cell that reads like missing data.
+            body={(row) => row.subcategory_name || row.subcategory_code || "All"}
+          />
+        )}
+        {kind === "slaRule" && (
+          <Column
+            field="priority_code"
+            header="Priority"
+            sortable={SORTABLE_FIELDS_BY_KIND[kind].has("priority_code")}
+          />
+        )}
+        {kind === "slaRule" && (
+          <Column
+            header="Escalation Levels"
+            body={(row) => {
+              const levels = [...((row.escalation_levels ?? []) as {
+                level: number;
+                resolve_within_minutes: number;
+              }[])].sort((a, b) => a.level - b.level);
+              if (levels.length === 0) return "-";
+              return levels
+                .map((level) => `L${level.level}: ${level.resolve_within_minutes}m`)
+                .join(", ");
+            }}
+          />
+        )}
+        {kind === "slaRule" && (
+          <Column
+            header="Working Hours"
+            body={(row) => yesNo(row.working_hours_only)}
+          />
+        )}
+        <Column
+          header="Active"
+          body={(row) => yesNo(row.is_active !== false)}
+          style={{ width: "8%" }}
+        />
+        <Column
+          header="Actions"
+          body={(row) => (
+            <div className="flex justify-center">
+              <ActionMenu
+                onEdit={() => edit(row)}
+                onDelete={() => void handleDelete(row)}
+              />
+            </div>
+          )}
+          style={{ width: "8%" }}
+        />
+      </DataTable>
+    </div>
+  );
+}
