@@ -175,6 +175,13 @@ class ModuleViewSet(SuperAdminMixin, viewsets.ModelViewSet):
     pagination_class = None
     filter_backends = []
 
+    @action(detail=False, methods=["get"], url_path="structure")
+    def structure(self, request):
+        """Module → sub-module → fields for a new company's projects."""
+        from .iwms_tables import structure
+
+        return Response({"modules": structure(None)})
+
     def perform_create(self, serializer):
         serializer.save(kind=Module.CUSTOM)
 
@@ -334,9 +341,32 @@ class CompanyViewSet(SuperAdminMixin, viewsets.ModelViewSet):
             return Response({"forms": save_company_forms(company, code, request.data)})
         return Response({"forms": company_forms(company, code)})
 
+    @action(detail=True, methods=["get"], url_path="structure")
+    def structure(self, request, pk=None):
+        """Database level for Edit project: module → sub-module → fields (?project=)."""
+        from .iwms_tables import structure
+
+        return Response({"modules": structure(self.get_object(), request.query_params.get("project") or None)})
+
+    @action(detail=True, methods=["post"], url_path="structure-preview")
+    def structure_preview(self, request, pk=None):
+        """What saving {project?, modules: [codes], screens: {...}} would create/drop."""
+        from .iwms_tables import clean_screens, preview
+
+        data = request.data if isinstance(request.data, dict) else {}
+        modules = [c for c in (data.get("modules") or []) if isinstance(c, str)]
+        screens = clean_screens(data.get("screens")) or {}
+        return Response(preview(self.get_object(), data.get("project") or None, modules, screens))
+
     @action(detail=True, methods=["get"], url_path="module-data")
     def module_data(self, request, pk=None):
-        return Response(data_summary(self._alias(self.get_object())))
+        from .iwms_tables import table_rows
+
+        alias = self._alias(self.get_object())
+        data = data_summary(alias)
+        for code, info in table_rows(alias).items():   # built-in modules' tables
+            data.setdefault(code, {"rows": info["rows"], "columns": {}})["tables"] = info["tables"]
+        return Response(data)
 
     @action(detail=True, methods=["get", "post"])
     def admins(self, request, pk=None):

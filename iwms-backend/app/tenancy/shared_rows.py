@@ -86,14 +86,41 @@ def shared_models():
     ]
 
 
-def copy_shared_rows(alias):
-    """Copy the master DB's no-company rows of company tables into `alias`.
-    Returns {table: rows copied}. Safe to run again."""
+# Lookups each company gets its own copy of (no table is shared between
+# companies). The master DB's rows are only the starting template.
+COMPANY_LOOKUPS = (
+    "continent", "country", "state", "fuel", "vehicletypecreation", "appmodule",
+    "complaintsource", "complaintlanguage", "complaintpriority", "complaintstatus", "complaintmodule",
+)
+
+
+def lookup_models():
+    tables = set(connections["default"].introspection.table_names())
+    return [m for m in apps.get_app_config("app").get_models()
+            if m._meta.model_name in COMPANY_LOOKUPS and m._meta.db_table in tables]
+
+
+def copy_shared_rows(alias, only=None):
+    """Copy the master DB's template rows into `alias`: no-company rows of
+    company tables and every lookup row. Returns {table: rows copied}.
+    Safe to run again (rows already there are skipped); tables the company
+    turned off (dropped) are skipped."""
     out = {}
+    have = set(connections[alias].introspection.table_names())
+    if only is not None:
+        have &= set(only)   # just these (newly created) tables
     with no_fk_checks(alias), transaction.atomic(using=alias):
         for model in shared_models():
+            if model._meta.db_table not in have:
+                continue
             source = model._base_manager.using("default").filter(company_id__isnull=True)
             n = copy_rows(model, source, alias)
+            if n:
+                out[model._meta.db_table] = n
+        for model in lookup_models():
+            if model._meta.db_table not in have:
+                continue
+            n = copy_rows(model, model._base_manager.using("default").all(), alias)
             if n:
                 out[model._meta.db_table] = n
     return out

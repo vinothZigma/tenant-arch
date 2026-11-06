@@ -99,8 +99,29 @@ class ModuleSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Module
-        fields = ["id", "code", "name", "description", "kind", "model_label", "fields", "is_active", "sub_modules"]
+        fields = ["id", "code", "name", "description", "kind", "model_label", "fields", "is_active", "sub_modules",
+                  "core", "tables", "depends_on"]
         read_only_fields = ["kind", "model_label"]
+
+    core = serializers.SerializerMethodField()
+    tables = serializers.SerializerMethodField()
+    depends_on = serializers.SerializerMethodField()
+
+    def _graph(self, obj):
+        from .iwms_tables import graph_json
+
+        if obj.kind != Module.BUILTIN:
+            return {"core": False, "tables": [f"module_{obj.code}"], "depends_on": []}
+        return graph_json().get(obj.code, {"core": True, "tables": [], "depends_on": []})
+
+    def get_core(self, obj):
+        return self._graph(obj)["core"]
+
+    def get_tables(self, obj):
+        return self._graph(obj)["tables"]
+
+    def get_depends_on(self, obj):
+        return self._graph(obj)["depends_on"]
 
     def get_sub_modules(self, obj):
         if obj.kind != Module.BUILTIN:

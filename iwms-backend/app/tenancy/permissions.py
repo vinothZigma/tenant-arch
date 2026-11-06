@@ -57,8 +57,12 @@ def company_permissions(company, project_id):
         if screen and action:
             granted.setdefault(screen, set()).add(action.lower())
 
+    from .iwms_tables import HIDDEN_MODULES
+
     modules = []
     for code, module in catalog.MODULES.items():
+        if code in HIDDEN_MODULES:
+            continue
         forms = {f["name"]: f for f in configured_forms(code)}
         screens = [s for s in module["screens"] if not s.get("superadmin_only")]
         if not screens:

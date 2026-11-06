@@ -117,7 +117,8 @@ class ComplaintAuditViewSet(viewsets.ViewSet):
         ticket = self._scoped_base_queryset().filter(unique_id=unique_id).first()
         if ticket is None:
             raise Http404
-        return Response({**summarize_tickets([ticket])[0], **ticket_timeline(ticket)})
+        return Response({**summarize_tickets([ticket])[0], **ticket_timeline(ticket),
+                         "audit_log": _stored_log(ticket)})
 
     @action(detail=False, methods=["get"], url_path="filter-options")
     def filter_options(self, request):
@@ -155,3 +156,12 @@ class ComplaintAuditViewSet(viewsets.ViewSet):
                 key=lambda o: o["name"].lower(),
             ),
         })
+
+
+def _stored_log(ticket):
+    """The ticket's rows in Complaint Audit's own table (empty when the
+    company turned Complaint Audit off and the table is gone)."""
+    from app.models.superadmin.audits.complaint_audit import ComplaintAuditLog
+
+    return list(ComplaintAuditLog.objects.filter(ticket_id=ticket.unique_id).values(
+        "event", "from_status_id", "to_status_id", "actor_type", "actor_id", "detail", "extra", "happened_at"))

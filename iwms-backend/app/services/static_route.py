@@ -47,6 +47,18 @@ PLANT_START_KEY = "plant:start"
 PLANT_END_KEY = "plant:end"
 
 
+
+def _routes_off():
+    """Static Route Map turned off for the current company: its tables
+    (TripPlanStaticRoute, DailyTripStaticRoute, RouteDetourWaypoint) are
+    dropped, so routes aren't saved or copied (app/tenancy/iwms_tables.py)."""
+    from app.tenancy.context import get_current_tenant_db
+    from app.tenancy.iwms_tables import missing_tables
+
+    alias = get_current_tenant_db()
+    return bool(alias) and "app_tripplanstaticroute" in missing_tables(alias)
+
+
 def cp_key(collection_point_id):
     return f"cp:{collection_point_id}"
 
@@ -372,6 +384,8 @@ def copy_plan_route_to_assignment(assignment, plan_route=None):
     """Give one daily trip its own copy of its plan's saved route. Returns
     the copy, or None when the plan has no saved route yet (the trip then
     follows the plan's current drawing live)."""
+    if _routes_off():
+        return None
     plan_route = plan_route or saved_plan_route(assignment.trip_plan_id)
     if not plan_route:
         return None
@@ -569,6 +583,8 @@ def save_plan_static_route(plan, user_id=None, trigger=None):
     change — previous route, new route and what differs — in
     StaticRouteAuditLog. `trigger` is one of StaticRouteAuditLog.TRIGGER_*.
     Returns (saved route, routing error or None, number of trips updated)."""
+    if _routes_off():
+        return None, None, 0
     stops = plan_route_stops(plan)
     waypoints = plan_detour_waypoints(plan.unique_id)
     # Routed before the transaction: it's an external HTTP call.
@@ -611,6 +627,8 @@ def sync_plan_static_route(plan, user_id=None, only_if_saved=False, trigger=None
     `only_if_saved`, does nothing for a plan whose route was never saved.
     Routing failures never block the edit that triggered this. Returns the
     saved route, or None."""
+    if _routes_off():
+        return None
     saved = saved_plan_route(plan.unique_id)
     if not saved and only_if_saved:
         return None

@@ -17,25 +17,8 @@ MASTER_MODELS = frozenset({
     # Platform super admins and (until company logins move into the company
     # DBs) every login. Account.user is a no-constraint FK because of this.
     "user",
-    # Geography shared by all companies.
-    "continent",
-    "country",
-    "state",
-    # Global vehicle lookups.
-    "fuel",
-    "vehicletypecreation",
-    # Which mobile app shells exist.
-    "appmodule",
-    # Complaint lookups used by every company's tickets.
-    "complaintsource",
-    "complaintlanguage",
-    "complaintpriority",
-    "complaintstatus",
-    "complaintmodule",
-    # One scheduler for the whole server.
+    # One scheduler process for the whole server (a server setting).
     "schedulerconfig",
-    # Cross-company API audit trail (has company_unique_id per row).
-    "commonaudit",
     # Plans, modules and billing (app/models/tenancy/master.py).
     "plan",
     "module",

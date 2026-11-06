@@ -76,12 +76,25 @@ def migrate_tenant_db(db_name, verbosity=0):
     audit triggers) work on this company's DB.
     """
     alias = register_tenant_db(db_name)
+    from . import iwms_tables
+
+    built = "tenancy_project_module" in iwms_tables.existing_tables(alias)
     with tenant_context(alias):
+        if built:
+            # Tables/columns dropped for unused modules/fields come back
+            # first, so the migrations find what they expect.
+            iwms_tables.restore_all(alias)
         # run_syncdb only matters for apps without migrations (the test
         # settings disable them); the router still filters which tables.
         call_command(
             "migrate", database=alias, verbosity=verbosity, interactive=False, run_syncdb=True
         )
+        if built:
+            from app.models.superadmin_masters.company import Company
+
+            company = Company.objects.filter(db_name=db_name, is_deleted=False).first()
+            if company is not None:
+                iwms_tables.sync_company(company, alias)
     return alias
 
 

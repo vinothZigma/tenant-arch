@@ -151,3 +151,33 @@ class ExtraFieldValue(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["form", "record_id"], name="uniq_tenancy_extra_field_value"),
         ]
+
+
+class DroppedColumn(models.Model):
+    """A column of a built-in IWMS table that was dropped from this company DB
+    because no project uses that field (app/tenancy/iwms_tables.py). The ORM
+    skips these columns (app/tenancy/orm_columns.py)."""
+
+    table_name = models.CharField(max_length=64)
+    column_name = models.CharField(max_length=64)
+    dropped_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "tenancy_dropped_column"
+        unique_together = [("table_name", "column_name")]
+
+
+class ProjectScreen(models.Model):
+    """Database level, per project: is this sub-module (IWMS screen) of a ticked
+    module wanted, and which of its fields are not (their columns may be
+    dropped). No row = wanted with every field. Set in Console → Companies →
+    (company) → Edit project; app/tenancy/iwms_tables.py builds the DB from it."""
+
+    project = models.ForeignKey("app.Project", on_delete=models.CASCADE, related_name="plan_screens")
+    screen = models.CharField(max_length=100)
+    is_enabled = models.BooleanField(default=True)
+    off_fields = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        db_table = "tenancy_project_screen"
+        unique_together = [("project", "screen")]

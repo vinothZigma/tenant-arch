@@ -62,6 +62,16 @@ def admin_projects(staff, alias):
     return live & set(ProjectAdmin.objects.using(alias).filter(staff=staff).values_list("project_id", flat=True))
 
 
+def admin_project_scope(staff):
+    """A company admin's project ids when the company has no IWMS Staff
+    Access Configuration (its tables dropped, or none for them): the projects
+    they run. None when it doesn't apply (not a company admin / no company DB)."""
+    alias = get_current_tenant_db()
+    if not alias or not getattr(staff, "is_company_admin", False):
+        return None
+    return sorted(admin_projects(staff, alias))
+
+
 def tenancy_screen_grants(staff_unique_id):
     """{main_screen: {screen: [actions]}} for a company admin: what the super
     admin granted the company (Console → Companies → Permissions) in the
@@ -83,15 +93,24 @@ def tenancy_screen_grants(staff_unique_id):
         return {}
     rows = CompanyUserScreenPermission.objects.using(alias).filter(
         company_id=staff.company_id, project_id__in=projects, permission_type="screen",
-        is_active=True, is_deleted=False).values_list("mainscreen_id", "userscreen_id", "userscreenaction_id")
+        is_active=True, is_deleted=False).values_list(
+        "project_id", "mainscreen_id", "userscreen_id", "userscreenaction_id")
+    # Edit project → Modules: a module/sub-module turned off in a project is
+    # not offered there, whatever the permissions say.
+    from .iwms_tables import enabled_screens, project_states
+
+    states = project_states(alias)
+    on = {p: enabled_screens(states[p]) for p in projects if p in states}
     mains = dict(MainScreen.objects.using(alias).values_list("unique_id", "mainscreen_name"))
     screens = dict(UserScreen.objects.using(alias).values_list("unique_id", "userscreen_name"))
     screen_mains = dict(UserScreen.objects.using(alias).values_list("unique_id", "mainscreen_id"))
     actions = dict(UserScreenAction.objects.using(alias).values_list("unique_id", "action_name"))
     grants = {}
-    for main_id, screen_id, action_id in rows:
+    for project_id, main_id, screen_id, action_id in rows:
         main = mains.get(main_id or screen_mains.get(screen_id))
         screen, action = screens.get(screen_id), (actions.get(action_id) or "").lower()
+        if screen not in on.get(project_id, set()):
+            continue
         if main and screen and action:
             current = grants.setdefault(main, {}).setdefault(screen, [])
             if action not in current:

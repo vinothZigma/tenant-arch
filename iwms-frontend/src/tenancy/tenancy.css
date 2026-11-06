@@ -611,3 +611,32 @@ a.plan-pill:hover { text-decoration: none; background: var(--primary-ring); }
 .tn .module-block + .module-block { margin-top: 12px; }
 .tn .project-link-card { cursor: pointer; }
 .tn .project-link-card:hover { border-color: var(--primary-border); }
+
+/* Edit project → Modules: module → sub-module → fields (database level) */
+.tn .structure { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); overflow: hidden; }
+.tn .st-module + .st-module { border-top: 1px solid var(--border); }
+.tn .st-row { display: flex; align-items: center; gap: 8px; padding: 7px 12px; min-height: 38px; }
+.tn .st-module-row { background: var(--surface); }
+.tn .st-module.is-on > .st-module-row { background: color-mix(in srgb, var(--primary, #4f46e5) 5%, var(--surface)); }
+.tn .st-children { border-top: 1px dashed var(--border); padding: 4px 0 6px; }
+.tn .st-group, .tn .st-form { padding-left: 34px; }
+.tn .st-form.st-nested { padding-left: 62px; }
+.tn .st-off .st-label { color: var(--muted); }
+.tn .st-label { display: inline-flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; }
+.tn .st-plain { color: var(--muted); padding-left: 24px; }
+.tn .st-meta { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.tn .st-caret, .tn .st-caret-space { width: 22px; height: 22px; flex: none; }
+.tn .st-caret { display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; background: transparent;
+  color: var(--muted); cursor: pointer; transform: rotate(-90deg); transition: transform .15s; }
+.tn .st-caret.open { transform: none; }
+.tn .st-tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--border); color: var(--muted); white-space: nowrap; }
+.tn .st-fields-btn { flex: none; }
+.tn .st-fields { margin: 2px 12px 8px 62px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  display: flex; flex-direction: column; gap: 8px; }
+.tn .st-fields.st-nested { margin-left: 90px; }
+@media (max-width: 640px) {
+  .tn .st-group, .tn .st-form { padding-left: 18px; }
+  .tn .st-form.st-nested { padding-left: 30px; }
+  .tn .st-fields, .tn .st-fields.st-nested { margin-left: 12px; }
+  .tn .st-meta { display: none; }
+}

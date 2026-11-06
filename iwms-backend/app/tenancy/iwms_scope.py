@@ -80,6 +80,11 @@ def _wanted_projects(alias):
 
 
 def sync_iwms_scopes(alias, company):
+    from .iwms_tables import missing_tables
+
+    # Staff Access Configuration turned off for this company: no IWMS scope
+    # rows (admins' projects then come from screen_grants.admin_project_scope).
+    scopes_on = StaffAccessConfiguration._meta.db_table not in missing_tables(alias)
     wanted = _wanted_projects(alias)
     people = Staffcreation.objects.using(alias).filter(is_deleted=False).filter(pk__in=list(wanted)) | \
         Staffcreation.objects.using(alias).filter(is_deleted=False, is_company_admin=True)
@@ -90,6 +95,8 @@ def sync_iwms_scopes(alias, company):
                 Staffcreation.objects.using(alias).filter(pk=staff.pk).update(
                     **{f: getattr(staff, f) for f in fields})
             projects = sorted(wanted.get(staff.pk, ()))
+            if not scopes_on:
+                continue
             config = StaffAccessConfiguration.objects.using(alias).filter(
                 staff_id=staff.pk, is_deleted=False).first()
             if config is None:

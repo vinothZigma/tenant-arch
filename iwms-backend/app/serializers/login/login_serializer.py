@@ -298,6 +298,14 @@ class LoginSerializer(serializers.Serializer):
             staff_project = staff_record.project
             if staff_project:
                 project_filter["unique_id"] = staff_project.unique_id
+            else:
+                # Company admin without an IWMS access configuration (e.g. the
+                # company turned Staff Access Configuration off): the projects they run.
+                from app.tenancy.screen_grants import admin_project_scope
+
+                scoped = admin_project_scope(staff_record)
+                if scoped is not None:
+                    project_filter["unique_id__in"] = scoped
 
         projects_queryset = Project.objects.filter(**project_filter).values(
             "unique_id", "name",

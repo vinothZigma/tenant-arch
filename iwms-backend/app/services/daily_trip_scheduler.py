@@ -97,6 +97,15 @@ def run_daily_trip_job(target_date=None, force: bool = False):
 
 
 def _generate_and_close_stale(target_date, force):
+    from app.tenancy.context import get_current_tenant_db
+
+    alias = get_current_tenant_db()
+    if alias:
+        from app.tenancy.iwms_tables import existing_tables
+
+        if "app_dailytripassignment" not in existing_tables(alias):
+            # Daily Operations is turned off for this company: its tables are gone.
+            return {"skipped": True, "reason": "Daily Operations is not used by this company."}
     result = run_for_date(target_date=target_date, force=force)
     # Same nightly pass: close trips left In Progress on earlier dates so
     # they stop sitting in the supervisor's "From earlier days" list. A

@@ -10,6 +10,7 @@ import {
 import { FieldInput, formatValue, Modal, UsageBar } from '../components'
 import { BrandMark, EmptyState, Icon, Loading, LogoUploader, PageHeader, ThemePicker, useToast } from '../ui'
 import { DEFAULT_THEME } from '../theme'
+import { ProjectStructure, screensFromTree, type DbModule, type Screens } from './projectStructure'
 
 const S = 'super' as const
 
@@ -56,38 +57,33 @@ export interface ProjectDraft {
   name: string
   description: string
   modules: Record<string, ModuleCaps>   // module code -> what may be done in it
+  screens: Screens                      // database level: sub-modules / fields on or off
   admin_usernames: string[]
   new_admins: NewAdmin[]                // only when editing an existing company
 }
 
-export const emptyProject = (name = ''): ProjectDraft => ({ name, description: '', modules: {}, admin_usernames: [], new_admins: [] })
-const fullCaps = (): ModuleCaps => ({ can_create: true, can_edit: true, can_delete: true })
+export const emptyProject = (name = ''): ProjectDraft => ({ name, description: '', modules: {}, screens: {}, admin_usernames: [], new_admins: [] })
 const emptyAdmin = (): NewAdmin => ({ username: '', password: '', full_name: '', email: '' })
 
 export function projectPayload(d: ProjectDraft) {
   return {
     name: d.name.trim(), description: d.description.trim(),
     modules: Object.entries(d.modules).map(([code, c]) => ({ code, ...c })),
+    screens: d.screens,
     admin_usernames: d.admin_usernames,
     new_admins: d.new_admins.filter((a) => a.username.trim()),
   }
 }
 
-function ProjectEditor({ draft, onChange, modules, adminOptions, allowNewAdmin }: {
+function ProjectEditor({ draft, onChange, modules, tree, adminOptions, allowNewAdmin }: {
   draft: ProjectDraft
   onChange: (d: ProjectDraft) => void
   modules: Module[]
+  tree: DbModule[] | null
   adminOptions: { username: string; label: string }[]
   allowNewAdmin?: boolean
 }) {
   const set = (patch: Partial<ProjectDraft>) => onChange({ ...draft, ...patch })
-  const toggleModule = (code: string, on: boolean) => {
-    const next = { ...draft.modules }
-    if (on) next[code] = fullCaps()
-    else delete next[code]
-    set({ modules: next })
-  }
-  const setCap = (code: string, cap: keyof ModuleCaps, v: boolean) => set({ modules: { ...draft.modules, [code]: { ...draft.modules[code], [cap]: v } } })
   const setNewAdmin = (i: number, patch: Partial<NewAdmin>) => set({ new_admins: draft.new_admins.map((a, j) => (j === i ? { ...a, ...patch } : a)) })
 
   return (
@@ -98,25 +94,14 @@ function ProjectEditor({ draft, onChange, modules, adminOptions, allowNewAdmin }
       </div>
 
       <div>
-        <div className="sub-label">Modules &amp; permissions</div>
-        <table className="perm-table">
-          <thead><tr><th>Module</th><th>View</th><th>Create</th><th>Edit</th><th>Delete</th></tr></thead>
-          <tbody>
-            {modules.filter((m) => m.is_active).map((m) => {
-              const c = draft.modules[m.code]
-              return (
-                <tr key={m.code} className={c ? '' : 'row-off'}>
-                  <td><label className="check"><input type="checkbox" checked={!!c} onChange={(e) => toggleModule(m.code, e.target.checked)} /> {m.name}</label></td>
-                  <td><input type="checkbox" checked={!!c} disabled title="Viewing comes with the module" /></td>
-                  {(['can_create', 'can_edit', 'can_delete'] as const).map((k) => (
-                    <td key={k}><input type="checkbox" disabled={!c} checked={!!c?.[k]} onChange={(e) => setCap(m.code, k, e.target.checked)} /></td>
-                  ))}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-        <p className="hint">The project's admins get exactly these permissions and can give their staff the same or less.</p>
+        <div className="sub-label">Modules</div>
+        <p className="hint" style={{ marginTop: 0 }}>
+          What this project keeps in the company database: module → sub-module → fields. Anything no project of the
+          company uses is <strong>dropped</strong> from the database (its rows are deleted); ticking it again creates it
+          again, empty. What admins may do and see in these is set under <em>Permissions &amp; fields</em>.
+        </p>
+        {tree ? <ProjectStructure tree={tree} modules={modules} value={{ modules: draft.modules, screens: draft.screens }}
+          onChange={(v) => set({ modules: v.modules, screens: v.screens })} /> : <Loading />}
       </div>
 
       <div>
@@ -198,10 +183,12 @@ export function CompanyWizard() {
   const [admins, setAdmins] = useState<NewAdmin[]>([{ ...emptyAdmin(), username: 'admin' }])
   const [projects, setProjects] = useState<ProjectDraft[]>([emptyProject('Main project')])
   const [plan, setPlan] = useState<number>(0)
+  const [tree, setTree] = useState<DbModule[] | null>(null)
 
   useEffect(() => {
     api<Plan[]>(S, 'GET', '/plans/').then(setPlans)
     api<Module[]>(S, 'GET', '/modules/').then(setModules)
+    api<{ modules: DbModule[] }>(S, 'GET', '/modules/structure/').then((r) => setTree(r.modules))
     api<Company[]>(S, 'GET', '/companies/').then(setCompanies)
   }, [])
   const logoUrl = useMemo(() => (logo ? URL.createObjectURL(logo) : null), [logo])
@@ -334,7 +321,7 @@ export function CompanyWizard() {
                   <strong><Icon name="layers" size={16} /> Project {i + 1}{p.name ? ` · ${p.name}` : ''}</strong>
                   {projects.length > 1 && <button type="button" className="sm danger" onClick={() => setProjects(projects.filter((_, j) => j !== i))}>Remove project</button>}
                 </div>
-                <ProjectEditor draft={p} onChange={(d) => updateProject(i, d)} modules={modules}
+                <ProjectEditor draft={p} onChange={(d) => updateProject(i, d)} modules={modules} tree={tree}
                   adminOptions={adminOptions} />
               </div>
             ))}
@@ -574,34 +561,55 @@ function ProjectsTab({ company, onChange }: { company: Company; onChange: () => 
   )
 }
 
+interface DbPreview {
+  create_tables: string[]; drop_tables: string[]; drop_columns: string[]; add_columns: string[]
+  rows: Record<string, number>; values: Record<string, number>
+}
+
 function ProjectModal({ company, project, modules, admins, projects, onClose, onSaved }: {
   company: Company; project: SuperProject | null; modules: Module[]; admins: CompanyAdminRow[]; projects: SuperProject[]
   onClose: () => void; onSaved: (list: SuperProject[], name: string) => void
 }) {
   const [moduleData, setModuleData] = useState<ModuleData>({})
-  useEffect(() => { if (project) fetchModuleData(company.id).then(setModuleData).catch(() => {}) }, [company.id, project])
+  const [tree, setTree] = useState<DbModule[] | null>(null)
   const [draft, setDraft] = useState<ProjectDraft>(() => project ? {
     name: project.name, description: project.description,
     modules: Object.fromEntries(project.modules.map((m) => [m.code, { can_create: m.can_create, can_edit: m.can_edit, can_delete: m.can_delete }])),
+    screens: {},
     admin_usernames: project.admins.map((a) => a.username), new_admins: [],
   } : { ...emptyProject(), new_admins: admins.length ? [] : [emptyAdmin()] })
+  useEffect(() => {
+    if (project) fetchModuleData(company.id).then(setModuleData).catch(() => {})
+    api<{ modules: DbModule[] }>(S, 'GET', `/companies/${company.id}/structure/${project ? `?project=${encodeURIComponent(String(project.id))}` : ''}`)
+      .then((r) => { setTree(r.modules); if (project) setDraft((d) => ({ ...d, screens: screensFromTree(r.modules) })) })
+      .catch((e) => setError((e as Error).message))
+  }, [company.id, project])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const removed = (project?.modules ?? []).filter((m) => !draft.modules[m.code])
-  // Only custom modules have their own table (module_<code>) that gets dropped;
-  // built-in IWMS tables are never dropped.
-  const dropping = project ? onlyIn(project, projects, removed.filter((m) => m.kind !== 'builtin').map((m) => m.code)) : []
-  const hidden = removed.filter((m) => !dropping.includes(m.code) && m.records > 0)
+  // Custom modules: their own table module_<code>, dropped when no other project uses them.
+  const removed = (project?.modules ?? []).filter((m) => !draft.modules[m.code] && m.kind !== 'builtin')
+  const dropping = project ? onlyIn(project, projects, removed.map((m) => m.code)) : []
   const dropLabel = (code: string) => `${modules.find((m) => m.code === code)?.name ?? code} (module_${code}, ${moduleData[code]?.rows ?? '…'} rows)`
 
   async function submit(e: FormEvent) {
     e.preventDefault()
     const p = projectProblem(draft)
     if (p) { setError(p); return }
-    if (dropping.length && !confirm(`No other project uses ${dropping.map(dropLabel).join(', ')}.\n\nSaving DROPS ${dropping.length === 1 ? 'that table' : 'those tables'} from the company's database, permanently deleting the rows.\n\nContinue?`)) return
     setBusy(true)
     setError('')
     try {
+      // What saving does to the company database (other projects included).
+      const pv = await api<DbPreview>(S, 'POST', `/companies/${company.id}/structure-preview/`, {
+        project: project?.id ?? null, modules: Object.keys(draft.modules), screens: draft.screens,
+      })
+      const lines: string[] = []
+      if (pv.drop_tables.length) lines.push(`DROP tables: ${pv.drop_tables.map((t) => `${t} (${pv.rows[t] ?? 0} rows)`).join(', ')}`)
+      if (pv.drop_columns.length) lines.push(`DROP columns: ${pv.drop_columns.map((c) => `${c} (${pv.values[c] ?? 0} values)`).join(', ')}`)
+      if (dropping.length) lines.push(`DROP tables: ${dropping.map(dropLabel).join(', ')}`)
+      if (lines.length && !confirm(`Saving changes the company database:\n\n${lines.join('\n\n')}\n\nThe rows/values in them are deleted permanently. Continue?`)) {
+        setBusy(false)
+        return
+      }
       const body = { ...projectPayload(draft), ...(project ? { is_active: project.is_active } : {}) }
       const list = project
         ? await api<SuperProject[]>(S, 'PUT', `/companies/${company.id}/projects/${project.id}/`, body)
@@ -613,22 +621,12 @@ function ProjectModal({ company, project, modules, admins, projects, onClose, on
   return (
     <Modal wide title={project ? `Edit ${project.name}` : `New project for ${company.name}`} onClose={onClose}>
       <form className="form" onSubmit={submit}>
-        <ProjectEditor draft={draft} onChange={setDraft} modules={modules} allowNewAdmin
+        <ProjectEditor draft={draft} onChange={setDraft} modules={modules} tree={tree} allowNewAdmin
           adminOptions={admins.filter((a) => !a.is_developer).map((a) => ({ username: a.username, label: `${a.full_name || a.username}${a.projects.length ? ` — runs ${a.projects.join(', ')}` : ''}` }))} />
-        {dropping.length > 0 && (
-          <div className="error"><Icon name="alert" size={18} />
-            <span>No other project uses {dropping.map(dropLabel).join(', ')}. Saving <strong>drops {dropping.length === 1 ? 'its table' : 'their tables'}</strong> from the database — its rows are deleted permanently.</span>
-          </div>
-        )}
-        {hidden.length > 0 && (
-          <div className="warn-box"><Icon name="alert" size={18} />
-            {hidden.map((m) => `${m.name} (${m.records})`).join(', ')}: this project's records are removed from the project. Other projects still use the module, so its table stays.
-          </div>
-        )}
         {error && <div className="error"><Icon name="alert" size={16} /> {error}</div>}
         <div className="form-actions">
           <button type="button" onClick={onClose}>Cancel</button>
-          <button className="primary" disabled={busy}>{busy ? 'Saving…' : project ? 'Save project' : 'Add project'}</button>
+          <button className="primary" disabled={busy || !tree}>{busy ? 'Saving…' : project ? 'Save project' : 'Add project'}</button>
         </div>
       </form>
     </Modal>

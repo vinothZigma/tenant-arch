@@ -127,7 +127,15 @@ def write_common_audit(
         user, instance
     )
 
-    return CommonAudit.objects.create(
+    # Each company's audit trail is in its own DB; actions with no company
+    # selected (the platform super admin) go to the master DB's trail.
+    from app.tenancy.context import get_current_tenant_db
+    from app.tenancy.router import MASTER_DB, per_db_mode
+
+    audits = CommonAudit.objects
+    if per_db_mode() and not get_current_tenant_db():
+        audits = CommonAudit.objects.using(MASTER_DB)
+    return audits.create(
         module_name=module_name,
         endpoint_name=endpoint_name,
         method=request.method,

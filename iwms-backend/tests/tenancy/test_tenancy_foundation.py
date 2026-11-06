@@ -120,7 +120,8 @@ class TestRouterQueries:
                 assert self.router.db_for_write(Project) == "iwms_company_b"
             assert self.router.db_for_read(Project) == "iwms_company_a"
             assert self.router.db_for_read(Company) == "default"
-            assert self.router.db_for_read(Continent) == "default"
+            # No IWMS table is shared: each company has its own continents.
+            assert self.router.db_for_read(Continent) == "iwms_company_a"
         assert get_current_tenant_db() is None
 
 

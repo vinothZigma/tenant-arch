@@ -83,6 +83,12 @@ class CommonAuditViewSet(
         rather than relying on the UI to omit the filter.
         """
         queryset = CommonAudit.objects.all().order_by("-createdAt")
+        from app.tenancy.context import get_current_tenant_db
+        from app.tenancy.router import MASTER_DB, per_db_mode
+
+        if per_db_mode() and not get_current_tenant_db():
+            # No company selected: the platform's own trail (master DB).
+            queryset = CommonAudit.objects.using(MASTER_DB).order_by("-createdAt")
         user = self.request.user
 
         if is_platform_super_admin(user):

@@ -14,7 +14,7 @@ from app.models.superadmin_masters.project import Project
 from app.models.tenancy.master import CompanyModule, Module
 from app.models.tenancy.tenant import ModulePermission, ProjectAdmin, ProjectModule
 
-from . import module_tables
+from . import iwms_tables, module_tables
 from .billing import user_room
 from .context import tenant_context
 from .db import register_tenant_db
@@ -64,10 +64,12 @@ def save_project(company, data, project=None):
     """Create or update a project.
 
     data: {name, description, is_active?, modules: [...], admin_usernames: [...],
-           new_admins: [{username, password, full_name, email}]}
+           new_admins: [{username, password, full_name, email}],
+           screens?: {sub-module: {enabled, off_fields: [...]}}}   (database level)
     """
     alias = register_tenant_db(company.db_name)
     p = clean_project(data, alias, project)
+    screens = iwms_tables.clean_screens(data.get("screens"))
     usernames = [u for u in (data.get("admin_usernames") or []) if isinstance(u, str)]
     existing = list(admins_qs(alias).filter(username__in=usernames))
     missing = {u.lower() for u in usernames} - {(s.username or "").lower() for s in existing}
@@ -91,6 +93,15 @@ def save_project(company, data, project=None):
                 project.is_active = bool(data["is_active"])
         project.save()
         admins = existing + create_admins(new, alias, company, project_id=project.pk)
+        # Database level: modules → sub-modules → fields. Turning one off
+        # turns off what needs it, turning one on brings what it needs; the
+        # tables/columns follow in sync_company_modules().
+        before = iwms_tables.project_states(alias).get(project.pk)
+        final = iwms_tables.save_project_screens(
+            alias, project, before, [m["code"] for m in p["modules"]], screens)
+        p["modules"] = [m for m in p["modules"] if m["code"] in final] + [
+            {"code": c, **{cap: True for cap in CAPS}}
+            for c in sorted(final - {m["code"] for m in p["modules"]})]
         codes = [m["code"] for m in p["modules"]]
         now = timezone.now()
         ProjectModule.objects.using(alias).filter(project=project).exclude(module_code__in=codes).update(
@@ -147,6 +158,8 @@ def sync_company_modules(company):
         if code not in codes:
             module_tables.drop_table(alias, code)
     CompanyModule.objects.filter(company=company).exclude(module__code__in=codes).delete()
+    # Built-in IWMS modules: tables/columns follow the projects too.
+    iwms_tables.sync_company(company, alias)
     refresh_staff_access(alias)
 
 

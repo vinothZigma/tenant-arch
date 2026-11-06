@@ -65,6 +65,12 @@ class CompanyProjectCreateViewSet(BulkUploadMixin, AuditViewSetMixin, viewsets.M
             scoped_ids = config.get_project_ids() if config else []
             if scoped_ids:
                 return queryset.filter(unique_id__in=scoped_ids)
+            if config is None:
+                from app.tenancy.screen_grants import admin_project_scope
+
+                admin_scope = admin_project_scope(user)
+                if admin_scope is not None:
+                    return queryset.filter(unique_id__in=admin_scope)
 
             user_project = getattr(user, "project_id", None)
             # project_id is likewise a CharField unique_id string.

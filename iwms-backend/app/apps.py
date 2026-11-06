@@ -9,8 +9,15 @@ class ApiConfig(AppConfig):
     
     def ready(self):
         from app.tenancy.enforcement import connect_signals
+        from app.tenancy.orm_columns import install as install_orm_columns
 
         connect_signals()
+        # Complaint Audit's own table follows the complaint workflow.
+        from app.services.complaint_audit_log import connect_signals as connect_complaint_audit
+
+        connect_complaint_audit()
+        # Company DBs may lack the columns of fields no project uses.
+        install_orm_columns()
         from app.services.daily_trip_scheduler import start_daily_trip_scheduler
 
         start_daily_trip_scheduler()
