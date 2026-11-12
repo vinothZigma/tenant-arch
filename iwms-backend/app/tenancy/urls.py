@@ -12,8 +12,7 @@ router.register("modules", sup.ModuleViewSet, basename="tenancy-modules")
 router.register("companies", sup.CompanyViewSet, basename="tenancy-companies")
 router.register("extra-records", sup.ExtraRecordPurchaseViewSet, basename="tenancy-extra-records")
 router.register("plan-requests", sup.PlanChangeRequestViewSet, basename="tenancy-plan-requests")
-
-DATA = "data/<str:company_id>/<str:project_id>/<slug:module_code>/"
+router.register("print-templates", sup.PrintTemplateViewSet, basename="tenancy-print-templates")
 
 # /api/super/...
 super_patterns = [
@@ -22,10 +21,9 @@ super_patterns = [
     path("me/", sup.MeView.as_view()),
     path("me/password/", sup.PasswordView.as_view()),
     path("dashboard/", sup.DashboardView.as_view()),
-    path("data/", sup.DataTreeView.as_view()),
-    path(DATA, sup.DataRecordsView.as_view()),
-    path(DATA + "<str:pk>/", sup.DataRecordDetailView.as_view()),
-    path(DATA + "<str:pk>/restore/", sup.DataRecordRestoreView.as_view()),
+    path("excel-screens/", sup.ExcelScreensView.as_view()),
+    # No "data/" browser: the platform super admin doesn't read company
+    # records; the company's developer login sees everything instead.
     path("", include(router.urls)),
 ]
 
@@ -52,4 +50,6 @@ workspace_patterns = [
     path("extras/<str:form>/<str:record_id>/", company.ExtraValuesView.as_view()),
     path("company/logo/", company.CompanyLogoView.as_view()),
     path("company/branding/", company.CompanyBrandingView.as_view()),
+    path("print-template/<slug:report_code>/", company.PrintTemplateView.as_view()),
+    path("excel-columns/", company.ExcelColumnsView.as_view()),
 ]

@@ -1,8 +1,8 @@
-import type { ProjectOption, StaffUserTypeOption } from "./types";
+import type { StaffUserTypeOption } from "./types";
 import { createCrudRoutePaths } from "@/utils/routePaths";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import Swal from "@/lib/notify";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { projectApi, projectStaffHierarchyApi, staffUserTypeApi } from "@/helpers/admin";
+import { projectStaffHierarchyApi, staffUserTypeApi } from "@/helpers/admin";
+import { useCompanyProjectSelection } from "@/hooks/useCompanyProjectSelection";
 
 const { encAdmins, encProjectStaffHierarchy } = getEncryptedRoute();
 const { listPath: ENC_LIST_PATH } = createCrudRoutePaths(
@@ -47,11 +48,28 @@ export default function ProjectStaffHierarchyForm() {
   const navigate = useNavigate();
   const { id } = useParams();
   const isEdit = Boolean(id);
+  const location = useLocation();
+  const routeState = location.state as { companyUniqueId?: string; projectId?: string } | null;
 
-  const [projects, setProjects] = useState<ProjectOption[]>([]);
+  // Company → Project, the same pickers as the other IWMS forms.
+  const {
+    companyUniqueId,
+    projectId,
+    projects,
+    companies,
+    isSuperAdmin,
+    loggedInCompanyUniqueId,
+    setProjectId,
+    onCompanyChange,
+    applyCompanyProjectFromRecord,
+  } = useCompanyProjectSelection({
+    isEdit,
+    initialCompanyId: routeState?.companyUniqueId,
+    initialProjectId: routeState?.projectId,
+  });
+
   const [staffUserTypes, setStaffUserTypes] = useState<StaffUserTypeOption[]>([]);
 
-  const [projectId, setProjectId] = useState("");
   const [staffUserTypeId, setStaffUserTypeId] = useState("");
   const [reportsToId, setReportsToId] = useState("");
   const [level, setLevel] = useState("1");
@@ -65,18 +83,16 @@ export default function ProjectStaffHierarchyForm() {
     let cancelled = false;
 
     Promise.all([
-      projectApi.readAll(),
       staffUserTypeApi.readAll(),
       isEdit && id ? projectStaffHierarchyApi.read(id) : Promise.resolve(null),
     ])
-      .then(([projectsRes, staffUserTypesRes, record]: any) => {
+      .then(([staffUserTypesRes, record]: any) => {
         if (cancelled) return;
 
-        setProjects(toList<ProjectOption>(projectsRes));
         setStaffUserTypes(toList<StaffUserTypeOption>(staffUserTypesRes));
 
         if (record) {
-          setProjectId(normalizeIdValue(record.project_id));
+          applyCompanyProjectFromRecord(record);
           setStaffUserTypeId(normalizeIdValue(record.staffusertype_id));
           setReportsToId(normalizeIdValue(record.reports_to_staffusertype_id));
           setLevel(String(record.level ?? "1"));
@@ -105,7 +121,7 @@ export default function ProjectStaffHierarchyForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!projectId || !staffUserTypeId) {
+    if (!companyUniqueId || !projectId || !staffUserTypeId) {
       Swal.fire(t("common.error"), t("common.all_fields_required"), "error");
       return;
     }
@@ -132,7 +148,7 @@ export default function ProjectStaffHierarchyForm() {
         isEdit ? t("common.updated_success") : t("common.added_success"),
         "success",
       );
-      navigate(ENC_LIST_PATH);
+      navigate(ENC_LIST_PATH, { state: { companyUniqueId, projectId } });
     } catch (error: any) {
       const data = error?.response?.data;
       const message =
@@ -162,12 +178,43 @@ export default function ProjectStaffHierarchyForm() {
 
         <form onSubmit={handleSubmit} className="px-6 py-6 space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* COMPANY */}
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                {t("admin.nav.company")} <span className="text-red-500">*</span>
+              </label>
+              <Select
+                value={companyUniqueId}
+                onValueChange={onCompanyChange}
+                disabled={Boolean(loggedInCompanyUniqueId) || !isSuperAdmin || companies.length === 0}
+              >
+                <SelectTrigger>
+                  <SelectValue
+                    placeholder={t("common.select_item_placeholder", {
+                      item: t("admin.nav.company"),
+                    })}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {companies.map((company) => (
+                    <SelectItem key={company.value} value={company.value}>
+                      {company.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
             {/* PROJECT */}
             <div>
               <label className="block text-sm font-medium mb-1">
                 {t("admin.nav.project")} <span className="text-red-500">*</span>
               </label>
-              <Select value={projectId} onValueChange={setProjectId}>
+              <Select
+                value={projectId}
+                onValueChange={setProjectId}
+                disabled={!companyUniqueId || projects.length === 0}
+              >
                 <SelectTrigger>
                   <SelectValue
                     placeholder={t("common.select_item_placeholder", {
@@ -177,12 +224,15 @@ export default function ProjectStaffHierarchyForm() {
                 </SelectTrigger>
                 <SelectContent>
                   {projects.map((project) => (
-                    <SelectItem key={project.unique_id} value={project.unique_id}>
-                      {project.name}
+                    <SelectItem key={project.value} value={project.value}>
+                      {project.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {companyUniqueId && projects.length === 0 && (
+                <p className="mt-1 text-xs text-red-500">No projects found for this company.</p>
+              )}
             </div>
 
             {/* STAFF USER TYPE (FROM) */}

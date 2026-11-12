@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, Download, FileDown, FileSpreadsheet, FileText, FolderOpen, Loader2, QrCode, SlidersHorizontal, Upload, X } from "lucide-react";
+import { ChevronDown, Download, FileDown, FileSpreadsheet, FileText, FolderOpen, Loader2, Printer, QrCode, SlidersHorizontal, Upload, X } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -202,6 +202,8 @@ export type DocumentActions = {
   downloadPdf?: DocAction;
   /** only on lists whose rows carry QR codes (customers, bins, staff …) */
   downloadQr?: DocAction;
+  /** print with the company's/project's print template (utils/printReport.ts) */
+  print?: DocAction;
 };
 
 export function DocumentsMenu({
@@ -211,6 +213,7 @@ export function DocumentsMenu({
   downloadExcelAll,
   downloadPdf,
   downloadQr,
+  print,
   label = "Documents",
 }: DocumentActions & { label?: string }) {
   const [open, setOpen] = useState(false);
@@ -221,6 +224,7 @@ export function DocumentsMenu({
     { key: "excel", text: twoExcelScopes ? "Excel (this page)" : "Download Excel", busyText: "Downloading…", icon: <FileSpreadsheet className="h-4 w-4 text-green-600" />, action: downloadExcel },
     { key: "excelAll", text: "Excel (all data)", busyText: "Downloading…", icon: <FileSpreadsheet className="h-4 w-4 text-green-600" />, action: downloadExcelAll },
     { key: "pdf", text: "Download PDF", busyText: "Generating PDF…", icon: <FileText className="h-4 w-4 text-red-600" />, action: downloadPdf },
+    { key: "print", text: "Print", busyText: "Preparing print…", icon: <Printer className="h-4 w-4 text-slate-600" />, action: print },
     { key: "qr", text: "Download QR", busyText: "Generating QR…", icon: <QrCode className="h-4 w-4 text-violet-600" />, action: downloadQr },
   ];
   const visible = items.filter((i) => i.action && !i.action.hidden);

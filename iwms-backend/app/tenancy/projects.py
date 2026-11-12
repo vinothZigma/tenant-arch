@@ -34,6 +34,59 @@ def live_projects(alias):
     return Project.objects.using(alias).filter(is_deleted=False)
 
 
+def clean_project_ids(alias, project_ids):
+    """The live project ids asked for, in order; at least one."""
+    if not isinstance(project_ids, (list, tuple)):
+        project_ids = [project_ids] if project_ids else []
+    wanted = list(dict.fromkeys(str(p) for p in project_ids if p))
+    live = set(live_projects(alias).filter(pk__in=wanted).values_list("pk", flat=True))
+    unknown = [p for p in wanted if p not in live]
+    if unknown:
+        raise ValidationError({"projects": "Choose projects of this company."})
+    if not wanted:
+        raise ValidationError({"projects": "Choose at least one project for this admin."})
+    return wanted
+
+
+def set_admin_projects(company, staff, project_ids):
+    """The projects a company admin runs (ProjectAdmin rows). A project may
+    not lose its last admin. The admin's own staff row keeps a project they run."""
+    alias = register_tenant_db(company.db_name)
+    wanted = clean_project_ids(alias, project_ids)
+    current = set(ProjectAdmin.objects.using(alias).filter(staff=staff).values_list("project_id", flat=True))
+    leaving = current - set(wanted)
+    orphaned = [
+        p.name for p in live_projects(alias).filter(pk__in=leaving)
+        if not ProjectAdmin.objects.using(alias).filter(project=p, staff__is_deleted=False,
+                                                        staff__is_developer=False).exclude(staff=staff).exists()
+    ]
+    if orphaned:
+        raise ValidationError({"projects": (
+            f'{", ".join(sorted(orphaned))} would have no admin left. '
+            "Give the project another admin first.")})
+    with transaction.atomic(using=alias):
+        ProjectAdmin.objects.using(alias).filter(staff=staff, project_id__in=leaving).delete()
+        for pid in wanted:
+            ProjectAdmin.objects.using(alias).get_or_create(project_id=pid, staff=staff)
+    refresh_staff_access(alias)  # also moves the staff row's project (fill_admin_projects)
+
+
+def fill_admin_projects(alias):
+    """Every company admin's staff row (Staffcreation.project_id) points at a
+    live project they run: kept when it still is, else the first one they
+    were given. Admins who run nothing are left alone; the developer has none."""
+    runs = {}
+    live = set(live_projects(alias).values_list("pk", flat=True))
+    for staff_id, pid in ProjectAdmin.objects.using(alias).order_by("pk").values_list("staff_id", "project_id"):
+        if pid in live:
+            runs.setdefault(staff_id, []).append(pid)
+    with tenant_context(alias):
+        for staff in admins_qs(alias).filter(pk__in=list(runs)):
+            if staff.project_id not in runs[staff.pk]:
+                staff.project_id = runs[staff.pk][0]
+                staff.save(update_fields=["project_id", "updated_at"])
+
+
 def clean_project(data, alias, project=None):
     """Validate {name, description, modules: [{code, can_create, can_edit, can_delete}]}."""
     name = (data.get("name") or "").strip()

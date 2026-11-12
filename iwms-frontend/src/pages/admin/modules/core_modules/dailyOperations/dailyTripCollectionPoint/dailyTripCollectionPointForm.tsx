@@ -17,6 +17,7 @@ import { dailyTripCollectionPointSchema } from "@/schemas/core_modules/dailyOper
 import { parseWithSchema, type FieldErrors } from "@/schemas/shared/parseFormErrors";
 import { FieldError } from "@/components/form/FieldError";
 import { FormSelect } from "@/components/common/FormSelect";
+import { useFieldVisibility } from "@/hooks/useFieldVisibility";
 
 
 const STATUS_OPTIONS: SelectOption[] = [
@@ -101,6 +102,8 @@ const extractError = (error: unknown): string | null => {
 };
 
 export default function DailyTripCollectionPointForm() {
+  // Console → Permissions & fields decides which fields this form shows.
+  const { showField: showZoneField } = useFieldVisibility("schedule-operations", "daily-trip-collection-points", { zone_id: ["zone_id"] });
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { id } = useParams<{ id?: string }>();
@@ -420,10 +423,10 @@ export default function DailyTripCollectionPointForm() {
               <FieldError message={fieldErrors.tripAssignmentId} />
             </div>
 
-            <div>
+            {showZoneField("zone_id") && <div>
               <Label>Zone</Label>
               <Select value={locationOptions.zoneId} onChange={locationOptions.setZoneId} options={locationOptions.zones} placeholder="Select zone" />
-            </div>
+            </div>}
 
             <div>
               <Label>Ward</Label>

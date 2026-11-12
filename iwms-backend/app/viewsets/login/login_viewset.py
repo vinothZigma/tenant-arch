@@ -317,6 +317,11 @@ def _describe_login(data):
         "app_screens": app_screens,
         "landing": landing,
         "permission_version": permission_version,
+        # Which fields each form shows (Console → Permissions & fields). The
+        # web app keeps no data across reloads: without these in the login
+        # and /login/me/ bodies every form showed every field.
+        "column_permissions": data.get("column_permissions") or {"grouped": {}, "flat": []},
+        "permission_details": data.get("permission_details") or {},
         "generated_at": generated_at,
         "email": email,
         "emp_id": emp_id,
@@ -341,6 +346,7 @@ def _describe_login(data):
 _SESSION_FIELDS = (
     "unique_id", "user_type", "name", "role", "permissions", "app_surfaces",
     "app_modules", "app_screens", "landing", "permission_version",
+    "column_permissions", "permission_details",
     "generated_at", "email", "emp_id", "employee_id", "company_unique_id",
     "company_name", "projects", "continents", "countries", "states",
     "districts", "cities", "zones", "panchayats", "wards", "profile",

@@ -98,6 +98,8 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     
     'app.middleware.module_permission_middleware.ModulePermissionMiddleware',
+    # Bulk uploads keep only the Excel import columns the super admin enabled.
+    'app.tenancy.excel_columns.ImportColumnsMiddleware',
     'app.middleware.request_meta_middleware.RequestMetaMiddleware',
 ]
 

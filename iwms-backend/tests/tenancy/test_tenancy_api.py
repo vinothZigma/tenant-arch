@@ -157,11 +157,6 @@ class TestRecords:
         assert r.data["data"]["name"] == "Pump 2"
         assert api.delete(f"{url}{row['id']}/").status_code == 204
         assert api.get(url).data == []
-        # Soft delete: still visible to the super admin with the deleted filter.
-        r = sup.get(f"/api/super/data/{c.pk}/{pid}/assets/?deleted=1")
-        assert len(r.data["records"]) == 1 and r.data["records"][0]["deleted_by"] == "boss"
-        assert sup.post(f"/api/super/data/{c.pk}/{pid}/assets/{row['id']}/restore/").status_code == 200
-        assert len(api.get(url).data) == 1
 
     def test_project_cap_blocks_admin(self, sup):
         c = make_company(sup, "Delta")   # assets: can_delete False
@@ -341,12 +336,13 @@ class TestSuperTools:
         me = bearer(r.data["token"]).get(f"/api/t/{c.slug}/ws/me/").data
         assert me["viewed_by_super_admin"] == "root" and me["user"]["username"] == "boss"
 
-    def test_data_tree_and_broken_company(self, sup):
+    def test_no_company_data_on_super_api_and_broken_company(self, sup):
         c = make_company(sup, "Oscar")
         Company.objects.create(name="Broken", db_name="iwms_company_missing")  # DB never created
-        tree = {t["name"]: t for t in sup.get("/api/super/data/").data}
-        assert tree["Oscar"]["error"] is None and tree["Oscar"]["projects"][0]["name"] == "North"
-        assert tree["Broken"]["error"]
+        # The console has no company-data browser (the developer login has that).
+        assert sup.get("/api/super/data/").status_code == 404
+        pid = admin_client(c).get(f"/api/t/{c.slug}/ws/me/").data["projects"][0]["id"]
+        assert sup.get(f"/api/super/data/{c.pk}/{pid}/assets/").status_code == 404
         companies = sup.get("/api/super/companies/")
         assert companies.status_code == 200 and len(companies.data) == 2
 
@@ -431,7 +427,6 @@ class TestIwmsModules:
         assert {m["code"] for m in me["projects"][0]["modules"]} == {"dashboard", "reports", "assets"}
         pid = me["projects"][0]["id"]
         assert api.get(f"/api/t/{c.slug}/ws/projects/{pid}/modules/dashboard/records/").data == []
-        assert sup.get(f"/api/super/data/{c.pk}/{pid}/dashboard/").data["records"] == []
 
     def test_builtin_records_are_listed_but_managed_in_iwms(self, sup):
         c = make_company(sup, "Victor")

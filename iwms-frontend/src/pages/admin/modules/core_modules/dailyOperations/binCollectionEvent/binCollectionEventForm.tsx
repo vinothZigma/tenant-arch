@@ -24,6 +24,7 @@ import { parseWithSchema, type FieldErrors } from "@/schemas/shared/parseFormErr
 import { FieldError } from "@/components/form/FieldError";
 import { FormSelect } from "@/components/common/FormSelect";
 import { PageLoader } from "@/components/ui/PageLoader";
+import { useFieldVisibility } from "@/hooks/useFieldVisibility";
 
 
 // A5: BinCollectionEvent.STATUS_CHOICES.
@@ -122,6 +123,8 @@ const collectionPointStopLabel = (stop: any, fallback = ""): string => {
 };
 
 export default function BinCollectionEventForm() {
+  // Console → Permissions & fields decides which fields this form shows.
+  const { showField: showZoneField } = useFieldVisibility("schedule-operations", "bin-collection-events", { zone_id: ["zone_id"] });
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { id } = useParams<{ id?: string }>();
@@ -626,7 +629,7 @@ export default function BinCollectionEventForm() {
                 <Label>Ward</Label>
                 <Input disabled className="bg-gray-100" value={record?.ward_name ?? ""} />
               </div>
-              <div>
+              {showZoneField("zone_id") && <div>
                 <Label>Zone</Label>
                 <Input
                   disabled
@@ -637,7 +640,7 @@ export default function BinCollectionEventForm() {
                       : String(record?.zone_name ?? "")
                   }
                 />
-              </div>
+              </div>}
             </div>
           )}
 

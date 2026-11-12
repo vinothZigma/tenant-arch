@@ -88,6 +88,8 @@ def tenancy_screen_grants(staff_unique_id):
     staff = Staffcreation.objects.using(alias).filter(pk=staff_unique_id, is_deleted=False).first()
     if staff is None or not staff.is_company_admin:
         return {}
+    if staff.is_developer:
+        return developer_grants()
     projects = admin_projects(staff, alias)
     if not projects:
         return {}
@@ -118,6 +120,25 @@ def tenancy_screen_grants(staff_unique_id):
     return grants
 
 
+def developer_grants():
+    """Every company screen with every action it offers. The developer is
+    not limited by Console → Permissions or by modules turned off in a
+    project (Edit project → Modules). Platform-only screens (superadmin_only,
+    Screen Management) stay out: the API refuses them to company logins."""
+    from .iwms_tables import HIDDEN_MODULES
+
+    grants = {}
+    for code, module in catalog.MODULES.items():
+        if code in HIDDEN_MODULES:
+            continue
+        for screen in module["screens"]:
+            if screen.get("superadmin_only"):
+                continue
+            offered = screen.get("actions") or catalog.SCREEN_ACTIONS.get(screen["name"]) or ALL_ACTIONS
+            grants.setdefault(code, {})[screen["name"]] = [a for a in ALL_ACTIONS if a in offered]
+    return grants
+
+
 def merge_permissions(base, extra):
     """Union of two {main: {screen: [actions]}} maps."""
     if not extra:
@@ -137,6 +158,8 @@ def tenancy_column_rows(company_unique_id, grants, staff=None):
     alias = get_current_tenant_db()
     if not grants or not company_unique_id or not alias:
         return None
+    if staff is not None and getattr(staff, "is_developer", False):
+        return None  # the developer sees every field
     from app.models.superadmin.screen_management.companyuserscreencolumnpermission import (
         CompanyUserScreenColumnPermission,
     )

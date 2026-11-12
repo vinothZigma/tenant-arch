@@ -72,6 +72,12 @@ import {
   saveBulkResult,
   type BulkUploadResult,
 } from "@/utils/bulkUpload";
+import {
+  applyImportColumns,
+  currentExcelProjectId,
+  fetchExcelColumns,
+  type ExcelColumnsInfo,
+} from "@/utils/excelColumns";
 import { decryptSegment } from "@/utils/routeCrypto";
 import { useScreenAccess } from "@/contexts/screenPermission";
 import BulkUploadResultDialog from "@/components/common/BulkUploadResultDialog";
@@ -354,6 +360,8 @@ type DataTableHeaderActionsProps = {
   renderHeaderWithActions?: (actions: ReactNode) => ReactNode;
   /** false when the table opted out of the built-in import/export actions */
   builtIns: boolean;
+  /** The list endpoint ("/masters/wards/") whose Excel column setting applies. */
+  excelResource?: string;
   filters?: TableFilters;
   documentActions?: DocumentActions;
 };
@@ -380,6 +388,7 @@ const DataTableHeaderActions = ({
   onServerExport,
   onPdfRequest,
   builtIns,
+  excelResource,
   filters,
   documentActions,
 }: DataTableHeaderActionsProps) => {
@@ -435,6 +444,29 @@ const DataTableHeaderActions = ({
     };
   }, [discoverImportColumns, importApi, importColumnsKey, bulkImportable]);
 
+  // The company's / project's Excel columns (Console → Excel columns):
+  // enabled import fields shape the template and the upload, enabled export
+  // fields the in-browser export. The server enforces both on its own.
+  const [excelSetting, setExcelSetting] = useState<ExcelColumnsInfo | null>(null);
+  const excelProjectId = currentExcelProjectId();
+  useEffect(() => {
+    if (!excelResource) {
+      setExcelSetting(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchExcelColumns(excelResource, excelProjectId).then((info) => {
+      if (!cancelled) setExcelSetting(info);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [excelResource, excelProjectId]);
+  const templateColumns = useMemo(
+    () => applyImportColumns(resolvedColumns, excelSetting?.import),
+    [resolvedColumns, excelSetting],
+  );
+
   const [exporting, setExporting] = useState<ExportScope | null>(null);
   const [generatingPdf, setGeneratingPdf] = useState(false);
 
@@ -467,6 +499,7 @@ const DataTableHeaderActions = ({
         toExportFilename(filename),
         sheetName || "Data",
         { scope },
+        excelSetting?.export,
       );
     } catch (error) {
       const message =
@@ -498,7 +531,7 @@ const DataTableHeaderActions = ({
   const handleTemplate = async () => {
     try {
       await exportTemplateToExcel(
-        resolvedColumns,
+        templateColumns,
         toTemplateFilename(importTemplateFilename),
         importSheetName || "Template",
       );
@@ -541,7 +574,7 @@ const DataTableHeaderActions = ({
       const excelRows = await readExcelRows(file);
       const payloads = mapExcelRowsToPayloads(
         excelRows,
-        resolvedColumns,
+        templateColumns,
         importDefaults,
       ).filter((payload) => Object.keys(payload).length > 0);
 
@@ -582,7 +615,11 @@ const DataTableHeaderActions = ({
       try {
         const formData = new FormData();
         formData.append("file", recordsToCsvFile(payloads, "bulk_upload.csv"));
-        bulkResponse = await runBulkUpload(importApi, formData);
+        bulkResponse = await runBulkUpload(
+          importApi,
+          formData,
+          excelProjectId ? { project_id: excelProjectId } : undefined,
+        );
       } catch (bulkError) {
         const status = errorStatus(bulkError);
         if (status !== 404 && status !== 405) throw bulkError;
@@ -681,7 +718,7 @@ const DataTableHeaderActions = ({
     builtIns &&
     bulkImportable &&
     allowImport &&
-    resolvedColumns.length > 0 &&
+    templateColumns.length > 0 &&
     (Boolean(onImportRows) || Boolean(importApi));
 
   // built-in actions first; the page's own `documentActions` replace them
@@ -739,6 +776,7 @@ const DataTableHeaderActions = ({
       "downloadExcelAll",
       "downloadPdf",
       "downloadQr",
+      "print",
     ] as const) {
       const action = documentMenuActions[key];
       if (action) documentMenuActions[key] = { ...action, hidden: true };
@@ -1121,7 +1159,8 @@ export const DataTable = <TValue extends SafeTableRows>(
         params,
       })) as SafeTableRows;
       if (rows.length === 0) throw new Error(NO_EXPORT_DATA_MESSAGE);
-      await exportRecordsToExcel(rows, filename, sheetName, { scope: "all" });
+      const setting = await fetchExcelColumns(serverApi.resource);
+      await exportRecordsToExcel(rows, filename, sheetName, { scope: "all" }, setting?.export);
     }
   };
 
@@ -1169,6 +1208,7 @@ export const DataTable = <TValue extends SafeTableRows>(
         onPdfRequest={onPdfRequest}
         renderHeaderWithActions={renderHeaderWithActions}
         builtIns={exportable}
+        excelResource={(serverApi ?? resolvedImportApi)?.resource}
         filters={filterPanel}
         documentActions={documentActions}
       />

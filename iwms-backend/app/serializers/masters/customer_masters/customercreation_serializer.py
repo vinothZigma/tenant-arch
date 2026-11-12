@@ -176,8 +176,8 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
     street = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     area = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
-    building_no = serializers.CharField()
-    sqft = serializers.DecimalField(max_digits=10, decimal_places=2)
+    building_no = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    sqft = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
 
     group_qr_id = serializers.CharField(read_only=True)
     is_bulkwaste_generator = serializers.BooleanField(read_only=True)
@@ -331,13 +331,9 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
         #             {"detail": "Customer with the same name and mobile already exists."}
         #         )
 
-        building_no = attrs.get("building_no", getattr(instance, "building_no", None))
-        if not building_no:
-            raise serializers.ValidationError({"building_no": "Building/House number is required."})
-
-        sqft = attrs.get("sqft", getattr(instance, "sqft", None))
-        if sqft is None:
-            raise serializers.ValidationError({"sqft": "Sqft is required."})
+        # Which fields are mandatory (building_no, sqft, ...) is decided by the
+        # form configuration (Modules -> form fields), enforced by
+        # tenancy.enforcement for the API and by bulk_upload for Excel rows.
 
         # property_id/sub_property_id in attrs are plain unique_id strings
         # (NameOrUniqueIdField resolves to the slug, not the instance, since

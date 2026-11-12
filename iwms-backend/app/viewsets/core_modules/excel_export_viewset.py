@@ -2,6 +2,8 @@
 
 POST /api/v1/exports/excel/
     {path, params?, columns?, file_name?, sheet_name?}
+    The columns come from the company's / project's Excel export setting
+    when the super admin made one (Console -> Excel columns).
     -> 200 .xlsx of every row of that list endpoint the caller can see
        (Content-Disposition: attachment, X-Row-Count: <rows>)
     -> 400 {"detail": "..."} on invalid input or a failed export
@@ -16,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from app.services.excel_export import API_PREFIX, ExportError, export_list_to_xlsx
+from app.tenancy.excel_columns import export_columns
 
 XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -112,6 +115,14 @@ class ExcelExportView(APIView):
         columns = _clean_columns(request.data.get("columns"))
         if columns is False:
             return _bad_request("columns must be a list of {header, field}.")
+        # The company's / project's Excel export setting wins over the
+        # columns the browser asks for, and fields the project may not see
+        # are never written (app/tenancy/excel_columns.py).
+        allowed = export_columns(request, path, params, requested=columns or None)
+        if allowed is not None:
+            if not allowed:
+                return _bad_request("None of these columns may be exported for this project.")
+            columns = allowed
         file_name = "".join(
             ch for ch in str(request.data.get("file_name") or "") if ch.isprintable() and ch not in "/\\"
         ).strip()[:255] or "export.xlsx"

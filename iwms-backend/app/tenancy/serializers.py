@@ -230,7 +230,7 @@ class CompanySerializer(serializers.ModelSerializer):
         return getattr(self, "_errors_by_company", {}).get(obj.pk)
 
     def get_logo_url(self, obj):
-        return logo_url(obj)
+        return logo_url(obj, self.context.get("request"))
 
     def get_login_path(self, obj):
         return f"/{obj.slug}/login"

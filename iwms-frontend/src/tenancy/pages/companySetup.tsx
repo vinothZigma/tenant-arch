@@ -639,15 +639,20 @@ function AdminsTab({ company }: { company: Company }) {
   const [adding, setAdding] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [form, setForm] = useState<NewAdmin>(emptyAdmin())
+  const [formProjects, setFormProjects] = useState<Id[]>([])
   const [error, setError] = useState('')
+  const [projects, setProjects] = useState<SuperProject[]>([])
+  const [editingProjects, setEditingProjects] = useState<CompanyAdminRow | null>(null)
+  useEffect(() => { api<SuperProject[]>(S, 'GET', `/companies/${company.id}/projects/`).then(setProjects) }, [company.id])
 
   async function add(e: FormEvent) {
     e.preventDefault()
     setError('')
+    if (!formProjects.length) { setError('Choose at least one project for this admin.'); return }
     try {
-      await api(S, 'POST', `/companies/${company.id}/admins/`, form)
-      toast(`${form.username} added. Assign them to projects from the Projects tab.`)
-      setForm(emptyAdmin()); setAdding(false); reload()
+      await api(S, 'POST', `/companies/${company.id}/admins/`, { ...form, projects: formProjects })
+      toast(`${form.username} added`)
+      setForm(emptyAdmin()); setFormProjects([]); setAdding(false); reload()
     } catch (err) { setError((err as Error).message) }
   }
 
@@ -662,7 +667,7 @@ function AdminsTab({ company }: { company: Company }) {
       </div>
       <div className="card table-wrap">
         <table>
-          <thead><tr><th>Admin</th><th>Email</th><th>Runs projects</th></tr></thead>
+          <thead><tr><th>Admin</th><th>Email</th><th>Runs projects</th><th></th></tr></thead>
           <tbody>
             {admins.map((a) => (
               <tr key={a.id} className={a.is_developer ? 'row-developer' : ''}>
@@ -673,6 +678,7 @@ function AdminsTab({ company }: { company: Company }) {
                 </td>
                 <td>{a.email || '—'}</td>
                 <td>{a.projects.length ? <div className="chips">{a.projects.map((p) => <span key={p} className="chip">{p}</span>)}</div> : <span className="muted small">No projects yet</span>}</td>
+                <td>{!a.is_developer && <button className="sm" onClick={() => setEditingProjects(a)}><Icon name="folder" size={14} /> Projects</button>}</td>
               </tr>
             ))}
           </tbody>
@@ -687,13 +693,66 @@ function AdminsTab({ company }: { company: Company }) {
               <label>Full name<input value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} /></label>
               <label>Email<input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></label>
             </div>
+            <div>
+              <div className="sub-label">Projects this admin runs</div>
+              <p className="hint" style={{ marginTop: 0 }}>Saved in the company database against the first project ticked; the admin can open every project ticked.</p>
+              <ProjectChecks projects={projects} value={formProjects} onChange={setFormProjects} />
+            </div>
             {error && <div className="error">{error}</div>}
             <div className="form-actions"><button type="button" onClick={() => setAdding(false)}>Cancel</button><button className="primary">Add admin</button></div>
           </form>
         </Modal>
       )}
       {resetting && <ResetPassword company={company} onClose={() => setResetting(false)} onSaved={reload} />}
+      {editingProjects && <AdminProjects company={company} admin={editingProjects} projects={projects}
+        onClose={() => setEditingProjects(null)} onSaved={() => { setEditingProjects(null); reload(); toast('Projects saved') }} />}
     </>
+  )
+}
+
+function ProjectChecks({ projects, value, onChange }: { projects: SuperProject[]; value: Id[]; onChange: (v: Id[]) => void }) {
+  if (!projects.length) return <p className="muted small">Add a project first.</p>
+  const has = (id: Id) => value.some((v) => String(v) === String(id))
+  return (
+    <div className="check-grid admin-options">
+      {projects.map((p) => (
+        <label key={p.id} className="check">
+          <input type="checkbox" checked={has(p.id)}
+            onChange={(e) => onChange(e.target.checked ? [...value, p.id] : value.filter((v) => String(v) !== String(p.id)))} />
+          {p.name}{!p.is_active && ' (archived)'}
+        </label>
+      ))}
+    </div>
+  )
+}
+
+function AdminProjects({ company, admin, projects, onClose, onSaved }: {
+  company: Company; admin: CompanyAdminRow; projects: SuperProject[]; onClose: () => void; onSaved: () => void
+}) {
+  const [value, setValue] = useState<Id[]>(admin.project_ids ?? [])
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  async function save(e: FormEvent) {
+    e.preventDefault()
+    setError('')
+    if (!value.length) { setError('Choose at least one project for this admin.'); return }
+    setBusy(true)
+    try {
+      await api(S, 'PUT', `/companies/${company.id}/admin-projects/`, { user_id: admin.id, projects: value })
+      onSaved()
+    } catch (err) { setError((err as Error).message) } finally { setBusy(false) }
+  }
+  return (
+    <Modal title={`Projects run by ${admin.full_name || admin.username}`} onClose={onClose}>
+      <form className="form" onSubmit={save}>
+        <ProjectChecks projects={projects} value={value} onChange={setValue} />
+        {error && <div className="error">{error}</div>}
+        <div className="form-actions">
+          <button type="button" onClick={onClose}>Cancel</button>
+          <button className="primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+        </div>
+      </form>
+    </Modal>
   )
 }
 

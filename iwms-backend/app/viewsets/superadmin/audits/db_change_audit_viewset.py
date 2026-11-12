@@ -13,7 +13,7 @@ from app.serializers.superadmin.audits.db_change_audit_serializer import (
     DbChangeAuditDetailSerializer,
     DbChangeAuditSerializer,
 )
-from app.utils.audit_context import is_platform_super_admin
+from app.utils.audit_context import is_platform_super_admin, limit_to_allowed_projects
 from app.utils.pagination import LimitOffsetWithPage
 
 
@@ -51,7 +51,8 @@ class DbChangeAuditViewSet(viewsets.ReadOnlyModelViewSet):
         company_uid = str(getattr(company, "unique_id", company) or "") or None
         if not company_uid:
             raise PermissionDenied("Company user required")
-        return queryset.filter(company_id=company_uid)
+        queryset = queryset.filter(company_id=company_uid)
+        return limit_to_allowed_projects(queryset, user)
 
     def get_queryset(self):
         queryset = self._scoped_base_queryset()

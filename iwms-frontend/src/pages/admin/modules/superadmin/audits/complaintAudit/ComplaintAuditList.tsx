@@ -18,6 +18,7 @@ import { FormSelect } from "@/components/common/FormSelect";
 import { FilterSection } from "@/components/common/ListToolbar";
 import { useDateRangeFilter } from "@/components/filters/useDateRangeFilter";
 import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
 import { combineFilters, useOptionFilter } from "@/components/filters/useOptionFilter";
 import ComplaintAuditDetail from "./ComplaintAuditDetail";
 import { formatDateTime, formatDuration, STATUS_COLORS } from "./format";
@@ -72,28 +73,28 @@ export default function ComplaintAuditList() {
 
   const toOptions = (items?: { unique_id: string; name: string }[]) =>
     (items ?? []).map((item) => ({ label: item.name, value: item.unique_id }));
-  const companyOptions = useMemo(() => toOptions(filterOptions?.companies), [filterOptions]);
-  const projectOptions = useMemo(() => toOptions(filterOptions?.projects), [filterOptions]);
   const statusOptions = useMemo(() => toOptions(filterOptions?.statuses), [filterOptions]);
   const categoryOptions = useMemo(() => toOptions(filterOptions?.categories), [filterOptions]);
 
   const resetPage = () => setFirst(0);
 
-  // Company → Project, Status and Category, edited in the Filters panel as a
-  // draft and sent once applied.
+  // Company → Project, the same filter as every other list: it opens on the
+  // signed-in company (and its only project).
+  const companyProject = useCompanyProjectFilter(resetPage);
+  const { companyId: companyFilter, projectId: projectFilter } = companyProject;
+  const draftCompany = companyProject.selection.companyUniqueId;
+
+  // Status and Category, edited in the Filters panel as a draft and sent
+  // once applied.
   const scope = useDraftFilter({
-    empty: { company: "", project: "", status: "", category: "" },
+    empty: { status: "", category: "" },
     chips: {
-      company: { label: "Company", format: (v) => nameOf(companyOptions, v), clears: ["project"] },
-      project: { label: "Project", format: (v) => nameOf(projectOptions, v) },
       status: { label: "Status", format: (v) => nameOf(statusOptions, v) },
       category: { label: "Category", format: (v) => nameOf(categoryOptions, v) },
     },
     onAppliedChange: resetPage,
   });
   const {
-    company: companyFilter,
-    project: projectFilter,
     status: statusFilter,
     category: categoryFilter,
   } = scope.applied;
@@ -172,7 +173,7 @@ export default function ComplaintAuditList() {
     const loadFilterOptions = async () => {
       try {
         const data = (await complaintAuditApi.read("filter-options", {
-          params: draft.company ? { company_id: draft.company } : {},
+          params: draftCompany ? { company_id: draftCompany } : {},
         })) as unknown as ComplaintAuditFilterOptions;
         if (mounted && data) setFilterOptions(data);
       } catch {
@@ -183,7 +184,7 @@ export default function ComplaintAuditList() {
     return () => {
       mounted = false;
     };
-  }, [draft.company]);
+  }, [draftCompany]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -242,24 +243,6 @@ export default function ComplaintAuditList() {
 
   const scopeField = (
     <>
-      <FilterSection label="Company & project">
-        <div className="grid grid-cols-2 gap-2">
-          <FormSelect
-            label="Company"
-            value={draft.company}
-            onChange={(value) => scope.setDraft((d) => ({ ...d, company: value, project: "" }))}
-            options={companyOptions}
-            placeholder={t("common.all")}
-          />
-          <FormSelect
-            label="Project"
-            value={draft.project}
-            onChange={(value) => scope.setField("project", value)}
-            options={projectOptions}
-            placeholder={t("common.all")}
-          />
-        </div>
-      </FilterSection>
       <FilterSection label="Complaint">
         <div className="grid grid-cols-2 gap-2">
           <FormSelect
@@ -315,7 +298,7 @@ export default function ComplaintAuditList() {
               searchPlaceholder="Search ticket no, title, reporter, phone…"
             />
           }
-          filterPanel={combineFilters({ ...scope, field: scopeField }, history, deleted, raised)}
+          filterPanel={combineFilters(companyProject, { ...scope, field: scopeField }, history, deleted, raised)}
           loadExportRows={loadAllExportRows}
           value={records}
           dataKey="unique_id"

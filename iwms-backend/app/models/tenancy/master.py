@@ -163,3 +163,82 @@ class FormConfig(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["module_code", "form"], name="uniq_tenancy_form_config"),
         ]
+
+
+class PrintTemplate(models.Model):
+    """A print layout for one report, designed by the super admin.
+
+    layout: see app/tenancy/print_templates.py (DEFAULT_LAYOUT) — paper,
+    header (logo / title / date), columns, totals, signatures, footer.
+    Companies never edit it; the super admin assigns it to a company or one
+    of its projects (PrintTemplateAssignment).
+    """
+
+    report_code = models.SlugField(max_length=50)    # e.g. "daily-trip-log"
+    name = models.CharField(max_length=100)
+    description = models.CharField(max_length=255, blank=True, default="")
+    layout = models.JSONField(default=dict, blank=True)
+    # The template used by every company/project that has no assignment.
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "tenancy_print_template"
+        ordering = ["report_code", "name", "id"]
+
+    def __str__(self):
+        return f"{self.report_code}: {self.name}"
+
+
+class PrintTemplateAssignment(models.Model):
+    """Which template a company (project_id="") or one project prints a report with.
+
+    Lookup order: the project's row, then the company's row, then the
+    report's default template. project_id is the company-DB Project pk
+    (no ForeignKey across databases).
+    """
+
+    company = models.ForeignKey("app.Company", on_delete=models.CASCADE, related_name="print_templates")
+    project_id = models.CharField(max_length=50, blank=True, default="")
+    report_code = models.SlugField(max_length=50)
+    template = models.ForeignKey(PrintTemplate, on_delete=models.CASCADE, related_name="assignments")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "tenancy_print_template_assignment"
+        constraints = [
+            models.UniqueConstraint(fields=["company", "project_id", "report_code"],
+                                    name="uniq_tenancy_print_template_assignment"),
+        ]
+
+
+class ExcelColumnSetting(models.Model):
+    """Which fields a company (project_id="") or one project gets in Excel.
+
+    kind "export": the columns (and order/headers) of Excel downloads.
+    kind "import": the columns of the upload template, and the only ones an
+    upload may fill. columns = [{"field", "header"}] in order; the fields are
+    checked against app/tenancy/excel_columns.py (screen_fields).
+    Lookup: the project's row, then the company's row, then every field.
+    """
+
+    EXPORT, IMPORT = "export", "import"
+    KINDS = ((EXPORT, "Export"), (IMPORT, "Import"))
+
+    company = models.ForeignKey("app.Company", on_delete=models.CASCADE, related_name="excel_columns")
+    project_id = models.CharField(max_length=50, blank=True, default="")
+    screen = models.CharField(max_length=100)      # IWMS userscreen name, e.g. "customercreations"
+    kind = models.CharField(max_length=10, choices=KINDS)
+    columns = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "tenancy_excel_column_setting"
+        constraints = [
+            models.UniqueConstraint(fields=["company", "project_id", "screen", "kind"],
+                                    name="uniq_tenancy_excel_column_setting"),
+        ]
+
+    def __str__(self):
+        return f"{self.company_id}/{self.project_id or '*'} {self.screen} {self.kind}"

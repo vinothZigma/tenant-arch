@@ -14,6 +14,16 @@ from app.serializers.superadmin_masters.project_create_serializer import (
 from app.utils.audit_mixin import AuditViewSetMixin
 from app.utils.bulk_upload_mixin import BulkUploadMixin
 
+def visible_project_ids(request):
+    """Project ids the caller may open (the Project screen's own scope), or
+    None for a platform super admin (every company, no limit)."""
+    view = CompanyProjectCreateViewSet(request=request, format_kwarg=None)
+    if view._is_platform_super_admin(getattr(request, "user", None)):
+        return None
+    # list(): never inline a subquery across databases.
+    return list(view.get_queryset().values_list("unique_id", flat=True))
+
+
 class CompanyProjectCreateViewSet(BulkUploadMixin, AuditViewSetMixin, viewsets.ModelViewSet):
     permission_classes = [PlatformOrCompanyAdminFullAccess]
     # MultiPart/Form parsers accept the project_logo upload.

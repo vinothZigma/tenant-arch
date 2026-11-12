@@ -27,6 +27,7 @@ import { StackCell } from "@/components/common/TableCells";
 import { FormSelect } from "@/components/common/FormSelect";
 import { FilterSection } from "@/components/common/ListToolbar";
 import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
 import {
   combineFilters,
   useOptionFilter,
@@ -35,9 +36,6 @@ import PermissionAuditDetail, { MethodBadge } from "./PermissionAuditDetail";
 
 const SORTABLE_FIELDS = new Set(["timestamp", "action_type", "http_method"]);
 
-// Sentinel for "company-wide, belongs to no project" — mirrors the backend,
-// since an empty string can't be distinguished from "no filter" in a query.
-const NO_PROJECT = "none";
 
 const ACTION_TYPES = ["CREATED", "UPDATED", "DELETED"] as const;
 
@@ -87,26 +85,6 @@ export default function PermissionAuditList() {
 
   const loading = isLoading && records.length === 0;
 
-  const companyOptions = useMemo(
-    () =>
-      (filterOptions?.companies ?? []).map((c) => ({
-        label: c.name,
-        value: c.unique_id,
-      })),
-    [filterOptions],
-  );
-
-  const projectOptions = useMemo(
-    () => [
-      { label: t("admin.permission_audit.no_project"), value: NO_PROJECT },
-      ...(filterOptions?.projects ?? []).map((p) => ({
-        label: p.name,
-        value: p.unique_id,
-      })),
-    ],
-    [filterOptions, t],
-  );
-
   const mainscreenOptions = useMemo(
     () =>
       (filterOptions?.mainscreens ?? []).map((m) => ({
@@ -132,23 +110,20 @@ export default function PermissionAuditList() {
 
   const resetPage = () => setFirst(0);
 
-  // Source, Company → Project and Main screen, edited in the Filters panel as
-  // a draft and sent once applied.
+  // Company → Project, the same filter as every other list: it opens on the
+  // signed-in company (and its only project).
+  const companyProject = useCompanyProjectFilter(resetPage);
+  const { companyId: companyFilter, projectId: projectFilter } = companyProject;
+  const draftCompany = companyProject.selection.companyUniqueId;
+
+  // Source and Main screen, edited in the Filters panel as a draft and sent
+  // once applied.
   const scope = useDraftFilter({
-    empty: { source: "", company: "", project: "", mainscreen: "" },
+    empty: { source: "", mainscreen: "" },
     chips: {
       source: {
         label: t("admin.permission_audit.source_filter_label"),
         format: (value) => nameOf(sourceOptions, value),
-      },
-      company: {
-        label: t("admin.permission_audit.company_filter_label"),
-        format: (value) => nameOf(companyOptions, value),
-        clears: ["project"],
-      },
-      project: {
-        label: t("admin.permission_audit.project_filter_label"),
-        format: (value) => nameOf(projectOptions, value),
       },
       mainscreen: {
         label: t("admin.permission_audit.main_screen_filter_label"),
@@ -159,8 +134,6 @@ export default function PermissionAuditList() {
   });
   const {
     source: sourceFilter,
-    company: companyFilter,
-    project: projectFilter,
     mainscreen: mainscreenFilter,
   } = scope.applied;
   const draft = scope.draft;
@@ -233,7 +206,7 @@ export default function PermissionAuditList() {
     const loadFilterOptions = async () => {
       try {
         const data = (await permissionAuditApi.read("filter-options", {
-          params: draft.company ? { company_id: draft.company } : {},
+          params: draftCompany ? { company_id: draftCompany } : {},
         })) as unknown as PermissionAuditFilterOptions;
         if (mounted && data) setFilterOptions(data);
       } catch {
@@ -245,7 +218,7 @@ export default function PermissionAuditList() {
     return () => {
       mounted = false;
     };
-  }, [draft.company]);
+  }, [draftCompany]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -348,28 +321,6 @@ export default function PermissionAuditList() {
           placeholder={t("common.all")}
         />
       </FilterSection>
-      <FilterSection label="Company & project">
-        <div className="grid grid-cols-2 gap-2">
-          <FormSelect
-            label={t("admin.permission_audit.company_filter_label")}
-            value={draft.company}
-            onChange={(value) =>
-              // A project belongs to one company, so a stale project filter
-              // would silently return nothing after switching company.
-              scope.setDraft((d) => ({ ...d, company: value, project: "" }))
-            }
-            options={companyOptions}
-            placeholder={t("common.all")}
-          />
-          <FormSelect
-            label={t("admin.permission_audit.project_filter_label")}
-            value={draft.project}
-            onChange={(value) => scope.setField("project", value)}
-            options={projectOptions}
-            placeholder={t("common.all")}
-          />
-        </div>
-      </FilterSection>
       <FilterSection label={t("admin.permission_audit.main_screen_filter_label")}>
         <FormSelect
           value={draft.mainscreen}
@@ -424,7 +375,7 @@ export default function PermissionAuditList() {
               searchPlaceholder={t("admin.permission_audit.search_placeholder")}
             />
           }
-          filterPanel={combineFilters({ ...scope, field: scopeField }, actionType)}
+          filterPanel={combineFilters(companyProject, { ...scope, field: scopeField }, actionType)}
           onServerExport={serverExport}
           value={records}
           dataKey="id"

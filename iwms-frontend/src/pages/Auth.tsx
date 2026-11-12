@@ -17,8 +17,12 @@ import {
 import {
   adminLandingPath,
   getStoredColumnPermissions,
+  getStoredPermissionDetails,
   getStoredPermissions,
   hasAnyPermission,
+  setStoredColumnPermissions,
+  setStoredPermissionDetails,
+  setStoredPermissions,
 } from "@/utils/permissions";
 import {
   persistLoginSession,
@@ -137,6 +141,15 @@ export default function Auth() {
         normalizeRole(payload.user?.role ?? payload.role ?? null) ?? DEFAULT_ROLE;
       const freshPermissions = getStoredPermissions();
       updatePermissions(freshPermissions, getStoredColumnPermissions());
+      // Once per login: the latest permissions and field settings
+      // (Console → Permissions & fields). No polling after this.
+      void api.get("login/my-permissions/").then((r) => {
+        const fresh = r.data ?? {};
+        setStoredPermissions(fresh.permissions ?? {});
+        setStoredPermissionDetails(fresh.permission_details ?? {});
+        setStoredColumnPermissions(fresh.column_permissions ?? {});
+        updatePermissions(getStoredPermissions(), getStoredColumnPermissions(), getStoredPermissionDetails());
+      }).catch(() => { /* the login response's permissions stay */ });
 
       //  Set user context
       setUser({

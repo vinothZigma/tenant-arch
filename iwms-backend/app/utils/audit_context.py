@@ -136,3 +136,22 @@ def resolve_tenancy(user, instance=None):
         _project_name(project_uid),
     )
 
+
+
+def limit_to_allowed_projects(queryset, user, field="project_id"):
+    """
+    The project limit every other company screen applies: a company user
+    whose Staff Access Configuration lists projects only sees audit rows of
+    those projects, plus company-level rows that carry no project. Users
+    with no listed projects (all projects of the company) are not narrowed.
+    """
+    from django.db.models import Q
+
+    from app.viewsets.dashboard.admin_dashboard_viewset import allowed_project_ids
+
+    allowed = allowed_project_ids(user)
+    if not allowed:
+        return queryset
+    return queryset.filter(
+        Q(**{f"{field}__in": allowed}) | Q(**{f"{field}__isnull": True}) | Q(**{field: ""})
+    )

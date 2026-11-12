@@ -22,6 +22,7 @@ import { tripPlanSchema } from "@/schemas/core_modules/scheduleSetup/tripPlan.sc
 import { parseWithSchema, type FieldErrors } from "@/schemas/shared/parseFormErrors";
 import { FieldError } from "@/components/form/FieldError";
 import { FormSelect } from "@/components/common/FormSelect";
+import { useFieldVisibility } from "@/hooks/useFieldVisibility";
 
 
 const statusOptions: SelectOption[] = [
@@ -191,6 +192,8 @@ const extractErrorMessage = (error: any): string | null => {
 };
 
 export default function TripPlanForm() {
+  // Console → Permissions & fields decides which fields this form shows.
+  const { showField: showTripField } = useFieldVisibility("schedule-setup", "trip-plans", {});
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { id } = useParams<{ id?: string }>();
@@ -873,7 +876,12 @@ export default function TripPlanForm() {
     if (!companyUniqueId) missingFields.push("Company");
     if (!projectId) missingFields.push("Project");
 
-    const validation = parseWithSchema(tripPlanSchema, fieldValues);
+    const parsed = parseWithSchema(tripPlanSchema, fieldValues);
+    // Fields turned off in Permissions & fields aren't on the form: don't demand them.
+    const validation = parsed.success ? parsed : (() => {
+      const errors = Object.fromEntries(Object.entries(parsed.errors).filter(([key]) => showTripField(key)));
+      return Object.keys(errors).length ? { ...parsed, errors } : { success: true as const, data: fieldValues };
+    })();
     if (!validation.success) {
       setFieldErrors(validation.errors);
     } else {
@@ -885,15 +893,16 @@ export default function TripPlanForm() {
       Swal.fire(t("common.warning"), `Please fill: ${[...missingFields, ...schemaMessages].join(", ")}`, "warning");
       return;
     }
-    if (!formData.panchayat_id && !formData.zone_id) {
+    if ((showTripField("zone_id") || showTripField("panchayat_id")) && !formData.panchayat_id && !formData.zone_id) {
       Swal.fire(t("common.warning"), "Select either Zone or PLB (Panchayat).", "warning");
       return;
     }
-    if (formData.ward_ids.length === 0) {
+    if (showTripField("ward_ids") && formData.ward_ids.length === 0) {
       Swal.fire(t("common.warning"), "At least one ward is required.", "warning");
       return;
     }
-    if (!Number.isFinite(triggerWeight) || !Number.isFinite(maxCapacity) || triggerWeight >= maxCapacity) {
+    if (showTripField("trip_trigger_weight_kg") && showTripField("max_vehicle_capacity_kg")
+      && (!Number.isFinite(triggerWeight) || !Number.isFinite(maxCapacity) || triggerWeight >= maxCapacity)) {
       Swal.fire(t("common.warning"), "Trigger weight must be less than vehicle capacity.", "warning");
       return;
     }
@@ -1005,11 +1014,11 @@ export default function TripPlanForm() {
                 placeholder={t("common.select_item_placeholder", { item: t("admin.nav.project") })}
               />
             </div>
-            <div><Label>District</Label><Select value={formData.district_id} onChange={setField("district_id")} options={options.districts} disabled={loading || !projectId} /><FieldError message={fieldErrors.district_id} /></div>
-            <div><Label>City</Label><Select value={formData.city_id} onChange={setField("city_id")} options={options.cities} disabled={loading || !formData.district_id} /><FieldError message={fieldErrors.city_id} /></div>
-            {showZone && !formData.panchayat_id && <div><Label>Zone</Label><Select value={formData.zone_id} onChange={setField("zone_id")} options={options.zones} disabled={loading || !formData.city_id} /></div>}
-            {showPanchayat && !formData.zone_id && <div><Label>PLB (Participating Local Bodies)</Label><Select value={formData.panchayat_id} onChange={setField("panchayat_id")} options={options.panchayats} disabled={loading || !formData.city_id} /></div>}
-            {(formData.zone_id || formData.panchayat_id) && (
+            {showTripField("district_id") && <div><Label>District</Label><Select value={formData.district_id} onChange={setField("district_id")} options={options.districts} disabled={loading || !projectId} /><FieldError message={fieldErrors.district_id} /></div>}
+            {showTripField("city_id") && <div><Label>City</Label><Select value={formData.city_id} onChange={setField("city_id")} options={options.cities} disabled={loading || !formData.district_id} /><FieldError message={fieldErrors.city_id} /></div>}
+            {showTripField("zone_id") && showZone && !formData.panchayat_id && <div><Label>Zone</Label><Select value={formData.zone_id} onChange={setField("zone_id")} options={options.zones} disabled={loading || !formData.city_id} /></div>}
+            {showTripField("panchayat_id") && showPanchayat && !formData.zone_id && <div><Label>PLB (Participating Local Bodies)</Label><Select value={formData.panchayat_id} onChange={setField("panchayat_id")} options={options.panchayats} disabled={loading || !formData.city_id} /></div>}
+            {showTripField("ward_ids") && (formData.zone_id || formData.panchayat_id) && (
               <div>
                 <Label>Ward</Label>
                 <MultiSelect
@@ -1032,10 +1041,10 @@ export default function TripPlanForm() {
                 />
               </div>
             )}
-            <div><Label>Staff Template</Label><Select value={formData.staff_template_id} onChange={setField("staff_template_id")} options={options.staffTemplates} disabled={loading || !projectId} /><FieldError message={fieldErrors.staff_template_id} /></div>
-            <div><Label>Vehicle</Label><Select value={formData.vehicle_id} onChange={setField("vehicle_id")} options={options.vehicles} disabled={loading || !projectId} /><FieldError message={fieldErrors.vehicle_id} /></div>
-            <div><Label>Supervisor</Label><Select value={formData.supervisor_id} onChange={setField("supervisor_id")} options={options.staff} disabled={loading || !projectId} /><FieldError message={fieldErrors.supervisor_id} /></div>
-            <div>
+            {showTripField("staff_template_id") && <div><Label>Staff Template</Label><Select value={formData.staff_template_id} onChange={setField("staff_template_id")} options={options.staffTemplates} disabled={loading || !projectId} /><FieldError message={fieldErrors.staff_template_id} /></div>}
+            {showTripField("vehicle_id") && <div><Label>Vehicle</Label><Select value={formData.vehicle_id} onChange={setField("vehicle_id")} options={options.vehicles} disabled={loading || !projectId} /><FieldError message={fieldErrors.vehicle_id} /></div>}
+            {showTripField("supervisor_id") && <div><Label>Supervisor</Label><Select value={formData.supervisor_id} onChange={setField("supervisor_id")} options={options.staff} disabled={loading || !projectId} /><FieldError message={fieldErrors.supervisor_id} /></div>}
+            {showTripField("waste_type_ids") && <div>
               <Label>Waste Type</Label>
               <MultiSelect
                 value={formData.waste_type_ids}
@@ -1058,12 +1067,12 @@ export default function TripPlanForm() {
                 className="!flex !h-10 !w-full !items-center !rounded-md !border !border-gray-300 !bg-white !px-3 !py-2 !text-sm !shadow-none"
               />
               <FieldError message={fieldErrors.waste_type_ids} />
-            </div>
-            <div><Label>Start Time</Label><Input type="time" value={formData.scheduled_time} onChange={(e) => setField("scheduled_time")(e.target.value)} disabled={!projectId} /><FieldError message={fieldErrors.scheduled_time} /></div>
-            <div><Label>Trigger Weight (kg)</Label><Input type="number" min={0} value={formData.trip_trigger_weight_kg} onChange={(e) => setField("trip_trigger_weight_kg")(e.target.value)} /></div>
-            <div><Label>Max Vehicle Capacity (kg)</Label><Input type="number" min={0} value={formData.max_vehicle_capacity_kg} onChange={(e) => setField("max_vehicle_capacity_kg")(e.target.value)} /></div>
-            <div><Label>Status</Label><Select value={formData.status} onChange={setField("status")} options={statusOptions} disabled={loading} /></div>
-            <div><Label>Approval Status</Label><Select value={formData.approval_status} onChange={setField("approval_status")} options={approvalStatusOptions} disabled={loading} /></div>
+            </div>}
+            {showTripField("scheduled_time") && <div><Label>Start Time</Label><Input type="time" value={formData.scheduled_time} onChange={(e) => setField("scheduled_time")(e.target.value)} disabled={!projectId} /><FieldError message={fieldErrors.scheduled_time} /></div>}
+            {showTripField("trip_trigger_weight_kg") && <div><Label>Trigger Weight (kg)</Label><Input type="number" min={0} value={formData.trip_trigger_weight_kg} onChange={(e) => setField("trip_trigger_weight_kg")(e.target.value)} /></div>}
+            {showTripField("max_vehicle_capacity_kg") && <div><Label>Max Vehicle Capacity (kg)</Label><Input type="number" min={0} value={formData.max_vehicle_capacity_kg} onChange={(e) => setField("max_vehicle_capacity_kg")(e.target.value)} /></div>}
+            {showTripField("status") && <div><Label>Status</Label><Select value={formData.status} onChange={setField("status")} options={statusOptions} disabled={loading} /></div>}
+            {showTripField("approval_status") && <div><Label>Approval Status</Label><Select value={formData.approval_status} onChange={setField("approval_status")} options={approvalStatusOptions} disabled={loading} /></div>}
           </div>
 
           <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
@@ -1211,7 +1220,7 @@ export default function TripPlanForm() {
               </p>
             </div>
 
-            {formData.is_auto_assign && (
+            {showTripField("repeat_days") && formData.is_auto_assign && (
               <div>
                 <Label>Repeat Days</Label>
                 <div className="mt-1 flex flex-wrap gap-2">

@@ -13,12 +13,17 @@ const S = 'super' as const
 
 interface PermAction { name: string; label: string; granted: boolean }
 interface PermField { name: string; label: string; required: boolean; enabled: boolean }
-interface PermScreen { name: string; label: string; available: boolean; actions: PermAction[]; fields: PermField[] }
+interface PermScreen {
+  name: string; label: string; available: boolean; actions: PermAction[]; fields: PermField[]
+  in_project?: boolean   // false: turned off in Edit project → Modules (database level)
+}
 interface PermModule { code: string; name: string; screens: PermScreen[] }
 interface PermData { projects: { id: string; name: string }[]; project: string | null; modules: PermModule[] }
 
 type Lists = Record<string, string[]>   // screen -> granted actions / enabled fields
 type View = 'actions' | 'fields'
+
+const STANDALONE = new Set(['use'])   // actions that don't need View
 
 const sameList = (a: string[] = [], b: string[] = []) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort())
 
@@ -66,15 +71,17 @@ export function ProjectPage() {
     return <EmptyState icon="layers" title="Project not found" text="It may have been deleted." />
   }
 
-  const screensOf = (m: PermModule) => m.screens.filter((s) => s.available)
+  const screensOf = (m: PermModule) => m.screens.filter((s) => s.available && s.in_project !== false)
+  const offIn = (m: PermModule) => m.screens.filter((s) => s.available && s.in_project === false)
   const allActions = [...new Set(data.modules.flatMap((m) => m.screens.flatMap((s) => s.actions.map((a) => a.name))))]
   const actionLabel = (n: string) =>
     data.modules.flatMap((m) => m.screens).flatMap((s) => s.actions).find((a) => a.name === n)?.label ?? n
 
   const toggle = (screen: string, action: string, on: boolean) => setGrants((cur) => {
     let list = on ? [...new Set([...(cur[screen] ?? []), action])] : (cur[screen] ?? []).filter((a) => a !== action)
-    if (on && action !== 'view') list = [...new Set([...list, 'view'])]   // can't add/edit what you can't see
-    if (!on && action === 'view') list = []                               // no view = nothing
+    // View = shown in the menu; Use = usable without being shown (stands alone).
+    if (on && !STANDALONE.has(action)) list = [...new Set([...list, 'view'])]   // can't add/edit what you can't see
+    if (!on && action === 'view') list = list.filter((a) => STANDALONE.has(a))  // no view = only Use left
     return { ...cur, [screen]: list }
   })
   const setScreen = (s: PermScreen, on: boolean) => setGrants((cur) => ({ ...cur, [s.name]: on ? s.actions.map((a) => a.name) : [] }))
@@ -103,7 +110,7 @@ export function ProjectPage() {
     } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
 
-  const modules = data.modules.filter((m) => screensOf(m).length)
+  const modules = data.modules.filter((m) => screensOf(m).length || offIn(m).length)
   return (
     <>
       <div className="breadcrumb">
@@ -173,6 +180,14 @@ export function ProjectPage() {
                         </tr>
                       )
                     })}
+                    {offIn(m).map((s) => (
+                      <tr key={s.name} className="row-off">
+                        <td><strong>{s.label}</strong></td>
+                        <td colSpan={allActions.length + 1} className="muted small">
+                          Turned off for this project in Edit project → Modules — tick it there to give permissions.
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>

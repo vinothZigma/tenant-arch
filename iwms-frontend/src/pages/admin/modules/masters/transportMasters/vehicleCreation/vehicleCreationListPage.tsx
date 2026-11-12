@@ -34,7 +34,6 @@ import { fileNameFromUrl, resolveMediaUrl } from "@/utils/mediaUrl";
 import { adminApi } from "@/helpers/admin/registry";
 import { recordExcelAudit } from "@/helpers/admin/commonAudit";
 import {
-  excelFileToCsvFile,
   exportTemplateToExcel,
   getAdminScreenExcelFilename,
   readExcelRows,
@@ -50,6 +49,7 @@ import {
   type BulkUploadResult,
 } from "@/utils/bulkUpload";
 import { runBulkUpload } from "@/utils/backgroundJobs";
+import { pageImportTemplate, pageSheetToUploadCsv } from "@/utils/excelColumns";
 import { Can } from "@/contexts/ScreenPermissionContext";
 import { useScreenAccess } from "@/contexts/screenPermission";
 
@@ -436,8 +436,13 @@ export default function VehicleCreationListPage() {
 
   // ── Bulk upload ───────────────────────────────────────────────────────────
   const downloadVehicleTemplate = async () => {
+    // Only the fields the super admin enabled for this company / project.
     await exportTemplateToExcel(
-      VEHICLE_BULK_TEMPLATE_COLUMNS,
+      await pageImportTemplate(
+        adminApi.vehicleCreations.resource,
+        VEHICLE_BULK_TEMPLATE_COLUMNS,
+        projectId,
+      ),
       getAdminScreenExcelFilename("template"),
       "Vehicles",
     );
@@ -454,13 +459,23 @@ export default function VehicleCreationListPage() {
         string,
         unknown
       >[];
-      const csvFile = await excelFileToCsvFile(file, "vehicle_bulk_upload.csv");
+      const csvFile = await pageSheetToUploadCsv(
+        file,
+        "vehicle_bulk_upload.csv",
+        adminApi.vehicleCreations.resource,
+        VEHICLE_BULK_TEMPLATE_COLUMNS,
+        projectId,
+      );
       const formData = new FormData();
       formData.append("file", csvFile);
       if (companyUniqueId) formData.append("company_id_input", companyUniqueId);
       if (projectId) formData.append("project_id_input", projectId);
 
-      const res = await runBulkUpload(adminApi.vehicleCreations, formData);
+      const res = await runBulkUpload(
+        adminApi.vehicleCreations,
+        formData,
+        projectId ? { project_id: projectId } : undefined,
+      );
 
       const errors = normalizeBulkErrors(res.errors, originalRows);
       const successCount = Number(res.success_count ?? 0);

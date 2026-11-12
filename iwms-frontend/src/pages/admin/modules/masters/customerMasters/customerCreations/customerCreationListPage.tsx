@@ -35,7 +35,6 @@ import { FilterBar } from "@/components/common/FilterBar";
 import { locationColumn } from "@/components/common/LocationColumn";
 import { StackCell } from "@/components/common/TableCells";
 import {
-  excelFileToCsvFile,
   exportRecordsToExcel,
   exportTemplateToExcel,
   getAdminScreenExcelFilename,
@@ -52,6 +51,11 @@ import {
   type BulkUploadResult,
 } from "@/utils/bulkUpload";
 import { runBulkUpload } from "@/utils/backgroundJobs";
+import {
+  fetchExcelColumns,
+  pageImportTemplate,
+  pageSheetToUploadCsv,
+} from "@/utils/excelColumns";
 import { Can } from "@/contexts/ScreenPermissionContext";
 import { useScreenAccess } from "@/contexts/screenPermission";
 import {
@@ -230,6 +234,7 @@ export default function CustomerCreationListPage() {
   const [isPrintingQr, setIsPrintingQr] = useState(false);
   const [isPreviewingQr, setIsPreviewingQr] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [isExportingQrStickers, setIsExportingQrStickers] = useState(false);
   const requestIdRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -424,8 +429,9 @@ export default function CustomerCreationListPage() {
       // non-fatal — ship the template without the allowed-values hint
     }
 
+    // Only the fields the super admin enabled for this company / project.
     await exportTemplateToExcel(
-      columns,
+      await pageImportTemplate(customerCreationApi.resource, columns, projectId),
       getAdminScreenExcelFilename("template"),
       "Customers",
     );
@@ -443,9 +449,12 @@ export default function CustomerCreationListPage() {
     setIsUploading(true);
     try {
       const originalRows = (await readExcelRows(file)) as Record<string, unknown>[];
-      const csvFile = await excelFileToCsvFile(
+      const csvFile = await pageSheetToUploadCsv(
         file,
         "customer_bulk_upload.csv",
+        customerCreationApi.resource,
+        CUSTOMER_BULK_TEMPLATE_COLUMNS,
+        projectId,
       );
       const formDataObj = new FormData();
       formDataObj.append("file", csvFile);
@@ -521,6 +530,45 @@ export default function CustomerCreationListPage() {
   // fetches every row matching the current filters, while "Current page"
   // uses the rows already on screen.
   const loadAllExportRows = async () => fetchExportRows();
+
+  // ── Excel download (every customer matching the current filters) ─────────
+  const handleDownloadExcel = async () => {
+    setIsExportingExcel(true);
+    try {
+      const rows = await fetchExportRows();
+      if (rows.length === 0) {
+        Swal.fire(
+          t("common.warning") || "Warning",
+          "No customers to export",
+          "warning",
+        );
+        return;
+      }
+      // Only the columns the super admin enabled (Console → Excel columns).
+      const setting = await fetchExcelColumns(
+        customerCreationApi.resource,
+        projectId || undefined,
+      );
+      await exportRecordsToExcel(
+        rows as unknown as Record<string, unknown>[],
+        getAdminScreenExcelFilename("all"),
+        "Customers",
+        { scope: "all" },
+        setting?.export,
+      );
+    } catch (error) {
+      Swal.fire({
+        icon: "error",
+        title: t("common.error"),
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to download the customers Excel.",
+      });
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
 
   const handleDownloadPdf = async () => {
     setIsExportingPdf(true);
@@ -844,6 +892,10 @@ export default function CustomerCreationListPage() {
               onClick: () => fileInputRef.current?.click(),
               busy: isUploading,
               disabled: !companyUniqueId || !projectId,
+            },
+            downloadExcel: {
+              onClick: () => void handleDownloadExcel(),
+              busy: isExportingExcel,
             },
             downloadPdf: {
               onClick: () => void handleDownloadPdf(),

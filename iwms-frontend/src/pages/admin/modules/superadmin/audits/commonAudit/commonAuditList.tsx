@@ -41,6 +41,7 @@ import { FilterBar } from "@/components/common/FilterBar";
 import { FormSelect } from "@/components/common/FormSelect";
 import { FilterSection } from "@/components/common/ListToolbar";
 import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
 import {
   combineFilters,
   useOptionFilter,
@@ -52,10 +53,6 @@ const SORTABLE_FIELDS = new Set([
   "company_name",
   "project_name",
 ]);
-
-// Sentinel for "company-wide, belongs to no project" — mirrors the backend,
-// since an empty string can't be distinguished from "no filter" in a query.
-const NO_PROJECT = "none";
 
 const toRecordList = (value: unknown): CommonAuditRecord[] => {
   if (Array.isArray(value)) return value as CommonAuditRecord[];
@@ -351,9 +348,6 @@ export default function CommonAuditList() {
   const [sortField, setSortField] = useState<string | undefined>(undefined);
   const [sortOrder, setSortOrder] = useState<SortOrder>(undefined);
   const [moduleNameOptions, setModuleNameOptions] = useState<string[]>([]);
-  const [filterOptions, setFilterOptions] = useState<AuditFilterOptions | null>(
-    null,
-  );
 
   const moduleOptions = useMemo<ModuleFilterOption[]>(
     () =>
@@ -364,55 +358,27 @@ export default function CommonAuditList() {
     [moduleNameOptions],
   );
 
-  const companyOptions = useMemo<ModuleFilterOption[]>(
-    () =>
-      (filterOptions?.companies ?? []).map((c) => ({
-        label: c.name,
-        value: c.unique_id,
-      })),
-    [filterOptions],
-  );
-
-  const projectOptions = useMemo<ModuleFilterOption[]>(
-    () => [
-      // Lets a user isolate company-wide activity that belongs to no project.
-      { label: t("admin.common_audit.no_project"), value: NO_PROJECT },
-      ...(filterOptions?.projects ?? []).map((p) => ({
-        label: p.name,
-        value: p.unique_id,
-      })),
-    ],
-    [filterOptions, t],
-  );
-
   const resetPage = () => setFirst(0);
 
-  // Module / Company → Project, edited in the Filters panel as a draft and
-  // sent once applied ("" = all).
+  // Company → Project, the same filter as every other list: it opens on the
+  // signed-in company (and its only project), so the trail is scoped to the
+  // company + project like the rest of IWMS.
+  const companyProject = useCompanyProjectFilter(resetPage);
+  const { companyId: companyFilter, projectId: projectFilter } = companyProject;
+  const draftCompany = companyProject.selection.companyUniqueId;
+
+  // Module, edited in the Filters panel as a draft and sent once applied.
   const scope = useDraftFilter({
-    empty: { module: "", company: "", project: "" },
+    empty: { module: "" },
     chips: {
       module: {
         label: t("admin.common_audit.module_filter_label"),
         format: (value) => nameOf(moduleOptions, value),
       },
-      company: {
-        label: t("admin.common_audit.company_filter_label"),
-        format: (value) => nameOf(companyOptions, value),
-        clears: ["project"],
-      },
-      project: {
-        label: t("admin.common_audit.project_filter_label"),
-        format: (value) => nameOf(projectOptions, value),
-      },
     },
     onAppliedChange: resetPage,
   });
-  const {
-    module: moduleFilter,
-    company: companyFilter,
-    project: projectFilter,
-  } = scope.applied;
+  const { module: moduleFilter } = scope.applied;
   const draft = scope.draft;
 
   // "" = all, "true"/"false" = only successful / only rejected writes.
@@ -539,7 +505,7 @@ export default function CommonAuditList() {
     statusFilter,
   ]);
 
-  // Distinct company/project/module/user values for the dropdowns, served by
+  // Distinct module/user values for the dropdowns, served by
   // the backend's `filter-options` action rather than derived from the
   // current page, so the lists stay complete — and stay scoped: a company
   // user is never offered another company here.
@@ -552,10 +518,9 @@ export default function CommonAuditList() {
     const loadFilterOptions = async () => {
       try {
         const data = (await commonAuditApi.read("filter-options", {
-          params: draft.company ? { company_unique_id: draft.company } : {},
+          params: draftCompany ? { company_unique_id: draftCompany } : {},
         })) as unknown as AuditFilterOptions;
         if (!mounted || !data) return;
-        setFilterOptions(data);
         setModuleNameOptions(Array.isArray(data.modules) ? data.modules : []);
       } catch {
         // Non-fatal: dropdowns simply won't have options if this fails.
@@ -567,7 +532,7 @@ export default function CommonAuditList() {
     return () => {
       mounted = false;
     };
-  }, [draft.company]);
+  }, [draftCompany]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -618,30 +583,6 @@ export default function CommonAuditList() {
           helpText={t("admin.common_audit.module_filter_hint")}
         />
       </FilterSection>
-      <FilterSection label="Company & project">
-        <div className="grid grid-cols-2 gap-2">
-          <FormSelect
-            label={t("admin.common_audit.company_filter_label")}
-            value={draft.company}
-            onChange={(value) =>
-              // A project belongs to one company, so a stale project filter
-              // would silently return nothing after switching company.
-              scope.setDraft((d) => ({ ...d, company: value, project: "" }))
-            }
-            options={companyOptions}
-            placeholder={t("common.all")}
-            helpText={t("admin.common_audit.company_filter_hint")}
-          />
-          <FormSelect
-            label={t("admin.common_audit.project_filter_label")}
-            value={draft.project}
-            onChange={(value) => scope.setField("project", value)}
-            options={projectOptions}
-            placeholder={t("common.all")}
-            helpText={t("admin.common_audit.project_filter_hint")}
-          />
-        </div>
-      </FilterSection>
     </>
   );
 
@@ -677,7 +618,7 @@ export default function CommonAuditList() {
             searchPlaceholder={t("admin.common_audit.search_placeholder")}
           />
         }
-        filterPanel={combineFilters({ ...scope, field: scopeField }, status)}
+        filterPanel={combineFilters(companyProject, { ...scope, field: scopeField }, status)}
         onServerExport={serverExport}
         value={records}
         dataKey="uuid"

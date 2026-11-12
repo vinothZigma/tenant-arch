@@ -7,8 +7,9 @@ from rest_framework.response import Response
 from app.models.superadmin_masters.company import Company
 from app.models.superadmin_masters.project import Project
 from app.services.audit_dashboard import TRAILS, in_range, parse_days, summary as build_summary, window
-from app.utils.audit_context import is_platform_super_admin
+from app.utils.audit_context import is_platform_super_admin, limit_to_allowed_projects
 from app.utils.pagination import LimitOffsetWithPage
+from app.viewsets.dashboard.admin_dashboard_viewset import allowed_project_ids
 
 
 class AuditDashboardViewSet(viewsets.ViewSet):
@@ -55,6 +56,11 @@ class AuditDashboardViewSet(viewsets.ViewSet):
                 raise PermissionDenied("Company user required")
             queryset = queryset.filter(**{trail.company_field: company_uid})
 
+            # Same project limit as the other screens: a company user whose
+            # access configuration lists projects only sees those (plus
+            # company-level rows that carry no project).
+            queryset = limit_to_allowed_projects(queryset, self.request.user, trail.project_field)
+
         project_id = params.get("project_id")
         if project_id:
             queryset = queryset.filter(**{trail.project_field: project_id})
@@ -94,6 +100,9 @@ class AuditDashboardViewSet(viewsets.ViewSet):
                 raise PermissionDenied("Company user required")
             companies = Company.objects.filter(unique_id=company_uid)
             projects = projects.filter(company_id=company_uid)
+            allowed = allowed_project_ids(request.user)
+            if allowed:
+                projects = projects.filter(unique_id__in=allowed)
 
         company_names = dict(companies.values_list("unique_id", "name"))
         return Response({

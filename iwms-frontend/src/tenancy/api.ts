@@ -163,7 +163,7 @@ export interface SuperProject {
   admins: { id: Id; username: string; full_name: string; email: string; is_active: boolean }[]
   staff_with_access: number
 }
-export interface CompanyAdminRow { id: Id; username: string; full_name: string; email: string; is_active: boolean; projects: string[]; is_developer?: boolean }
+export interface CompanyAdminRow { id: Id; username: string; full_name: string; email: string; is_active: boolean; projects: string[]; project_ids?: Id[]; is_developer?: boolean }
 export interface NewAdmin { username: string; password: string; full_name: string; email: string }
 export interface TenantUser {
   id: Id; username: string; email: string; full_name: string; is_company_admin: boolean; is_developer?: boolean; is_active: boolean

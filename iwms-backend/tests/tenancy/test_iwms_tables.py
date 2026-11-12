@@ -364,3 +364,58 @@ class TestColumns:
         r = sup.put(url, {"project": project, "fields": {"vehicle-creation": ["vehicle_no"]}}, format="json")
         assert r.status_code == 200, r.content
         assert "service_record" in columns(c, "app_vehiclecreation")
+
+
+class TestUseWithoutView:
+    def test_use_does_not_bring_view(self, sup):
+        from .test_tenancy_api import iwms_login
+
+        c = make_company(sup, "Tango Two", modules=[{"code": "attendance"}])
+        seed_screens(c, "attendance", module="attendance")
+        url = f"/api/super/companies/{c.pk}/permissions/"
+        project = sup.get(url).data["project"]
+        r = sup.put(url, {"project": project, "actions": {"attendance": ["use"]}}, format="json")
+        assert r.status_code == 200, r.content
+        screen = next(s for m in r.data["modules"] for s in m["screens"] if s["name"] == "attendance")
+        assert [a["name"] for a in screen["actions"] if a["granted"]] == ["use"]     # usable, not shown
+        perms = iwms_login(c.slug, "boss").get(f"/api/t/{c.slug}/login/my-permissions/").data["permissions"]
+        assert perms["attendance"]["attendance"] == ["use"]
+        # Add still brings View.
+        r = sup.put(url, {"project": project, "actions": {"attendance": ["use", "add"]}}, format="json")
+        screen = next(s for m in r.data["modules"] for s in m["screens"] if s["name"] == "attendance")
+        assert sorted(a["name"] for a in screen["actions"] if a["granted"]) == ["add", "use", "view"]
+
+
+class TestFieldsReachTheWebSession:
+    def test_login_and_me_carry_the_field_settings(self, sup):
+        c = make_company(sup, "Uniform Two", modules=[{"code": "common-masters"}])
+        seed_screens(c, "countries")
+        url = f"/api/super/companies/{c.pk}/permissions/"
+        project = sup.get(url).data["project"]
+        r = sup.put(url, {"project": project, "actions": {"countries": ["view"]},
+                          "fields": {"countries": ["name", "currency"]}}, format="json")
+        assert r.status_code == 200, r.content
+
+        def hidden(body):
+            rows = body["column_permissions"]["grouped"]["common-masters"]["countries"]
+            return {x["fieldName"] for x in rows if not x["canView"]}
+
+        client = APIClient()
+        login = client.post(f"/api/t/{c.slug}/login/", {"username": "boss", "password": "secret12"}, format="json")
+        assert login.status_code == 200, login.content
+        assert "mob_code" in hidden(login.data) and "name" not in hidden(login.data)
+        # A page reload restores the session from /login/me/: same field settings.
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access_token']}")
+        me = client.get(f"/api/t/{c.slug}/login/me/")
+        assert me.status_code == 200, me.content
+        assert hidden(me.data) == hidden(login.data)
+
+
+class TestPermissionsShowDbLevel:
+    def test_sub_module_off_in_edit_project_is_marked(self, sup):
+        c = make_company(sup, "Victor Two", modules=[{"code": "attendance"}, {"code": "audits"}])
+        seed_screens(c, "attendance", "login-audit", "common-audit", module="attendance")
+        save(sup, c, ["attendance", "audits"], screens={"common-audit": {"enabled": False}})
+        data = sup.get(f"/api/super/companies/{c.pk}/permissions/").data
+        audits = {s["name"]: s for m in data["modules"] if m["code"] == "audits" for s in m["screens"]}
+        assert audits["login-audit"]["in_project"] and not audits["common-audit"]["in_project"]

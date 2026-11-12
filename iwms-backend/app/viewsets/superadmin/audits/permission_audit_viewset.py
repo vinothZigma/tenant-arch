@@ -12,7 +12,7 @@ from app.models.superadmin_masters.project import Project
 from app.serializers.superadmin.audits.permission_audit_serializer import (
     PermissionAuditLogSerializer,
 )
-from app.utils.audit_context import is_platform_super_admin
+from app.utils.audit_context import is_platform_super_admin, limit_to_allowed_projects
 from app.utils.pagination import LimitOffsetWithPage
 
 
@@ -64,7 +64,8 @@ class PermissionAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         if not company_uid:
             raise PermissionDenied("Company user required")
 
-        return queryset.filter(company_id=company_uid)
+        queryset = queryset.filter(company_id=company_uid)
+        return limit_to_allowed_projects(queryset, user)
 
     def get_queryset(self):
         queryset = self._scoped_base_queryset()

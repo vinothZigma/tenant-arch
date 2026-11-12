@@ -1,11 +1,12 @@
 """Super admin API: /api/super/..."""
 from django.contrib.auth import authenticate
 from django.contrib.auth.hashers import make_password
+from django.db import transaction
 from django.db.models import ProtectedError, Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -16,7 +17,7 @@ from app.models.superadmin.staff_management.staffcreation import Staffcreation
 from app.models.superadmin_masters.company import Company
 from app.models.superadmin_masters.project import Project
 from app.models.tenancy.master import (
-    CompanyModule, ExtraRecordPurchase, Module, Plan, PlanChangeRequest,
+    CompanyModule, ExtraRecordPurchase, Module, Plan, PlanChangeRequest, PrintTemplate, PrintTemplateAssignment,
 )
 
 from .auth import SuperAdminAuthentication, super_token, tenant_token
@@ -33,7 +34,11 @@ from .people import (
     check_not_reserved, check_password_rules, clean_email, clean_new_admins, create_admins, login_json,
     username_taken,
 )
-from .projects import admins_qs, delete_project, projects_json, save_project
+from .print_templates import check_report, clean_layout, reports_json, resolve_template, template_json
+from .projects import (
+    admins_qs, clean_project_ids, delete_project, live_projects, projects_json, save_project,
+    set_admin_projects,
+)
 from .serializers import (
     CompanySerializer, ExtraRecordPurchaseSerializer, ModuleSerializer, PlanChangeRequestSerializer,
     PlanSerializer, clean_field_definitions,
@@ -141,7 +146,7 @@ class DashboardView(SuperAdminMixin, APIView):
                 users += billable_users(alias).count()
             except Exception as exc:
                 errors.append({"company": c.name, "error": str(exc)})
-        tree = data_tree()
+        tree = data_tree(request)
         records = sum(c["records"] for c in tree)
         paid = ExtraRecordPurchase.objects.filter(status=ExtraRecordPurchase.PAID).aggregate(t=Sum("total_amount"))
         monthly = sum(float(c.plan.price) for c in companies.select_related("plan") if c.plan and c.is_active)
@@ -300,7 +305,7 @@ class CompanyViewSet(SuperAdminMixin, viewsets.ModelViewSet):
             remove_logo(company)
         else:
             set_logo(company, request.FILES.get("logo"))
-        return Response({"logo_url": logo_url(company)})
+        return Response({"logo_url": logo_url(company, request)})
 
     @action(detail=True, methods=["post"], url_path="open-workspace")
     def open_workspace(self, request, pk=None):
@@ -372,21 +377,42 @@ class CompanyViewSet(SuperAdminMixin, viewsets.ModelViewSet):
     def admins(self, request, pk=None):
         company = self.get_object()
         alias = self._alias(company)
-        if request.method == "POST":
-            cleaned = clean_new_admins([request.data], alias)
-            user_room(company, alias, 1)
-            create_admins(cleaned, alias, company)
         from app.models.tenancy.tenant import ProjectAdmin
 
+        if request.method == "POST":
+            # Body: {username, password, full_name, email, projects: [project ids]}.
+            # Stored as a staff row in the company DB against the first project;
+            # runs every project chosen.
+            project_ids = clean_project_ids(alias, request.data.get("projects"))
+            cleaned = clean_new_admins([request.data], alias)
+            user_room(company, alias, 1)
+            with transaction.atomic(using=alias):
+                (staff,) = create_admins(cleaned, alias, company, project_id=project_ids[0])
+                for pid in project_ids:
+                    ProjectAdmin.objects.using(alias).get_or_create(project_id=pid, staff=staff)
+            refresh_staff_access(alias)
+
         names = dict(Project.objects.using(alias).filter(is_deleted=False).values_list("pk", "name"))
-        runs = {}
-        for link in ProjectAdmin.objects.using(alias).all():
+        runs, ids = {}, {}
+        for link in ProjectAdmin.objects.using(alias).order_by("pk"):
             if link.project_id in names:
                 runs.setdefault(link.staff_id, []).append(names[link.project_id])
+                ids.setdefault(link.staff_id, []).append(link.project_id)
         people = Staffcreation.objects.using(alias).filter(is_company_admin=True, is_deleted=False)
-        rows = [login_json(u, {"projects": ["All projects"] if u.is_developer else sorted(runs.get(u.pk, []))})
+        rows = [login_json(u, {"projects": ["All projects"] if u.is_developer else sorted(runs.get(u.pk, [])),
+                               "project_ids": [] if u.is_developer else ids.get(u.pk, [])})
                 for u in people.order_by("is_developer", "username")]
         return Response(rows, status=201 if request.method == "POST" else 200)
+
+    @action(detail=True, methods=["put"], url_path="admin-projects")
+    def admin_projects(self, request, pk=None):
+        """The projects a company admin runs. Body: {user_id, projects: [project ids]}."""
+        company = self.get_object()
+        user = admins_qs(self._alias(company)).filter(pk=request.data.get("user_id")).first()
+        if not user:
+            return Response({"detail": "Admin user not found."}, status=404)
+        set_admin_projects(company, user, request.data.get("projects"))
+        return Response({"ok": True})
 
     @action(detail=True, methods=["post"], url_path="reset-admin-password")
     def reset_admin_password(self, request, pk=None):
@@ -414,6 +440,85 @@ class CompanyViewSet(SuperAdminMixin, viewsets.ModelViewSet):
             user.save(update_fields=fields)
         refresh_staff_access(alias)
         return Response(login_json(user))
+
+    @action(detail=True, methods=["get", "put"], url_path="excel-columns")
+    def excel_columns(self, request, pk=None):
+        """GET ?project_id= : the company's projects and the Excel settings that
+        reach that project ("" = the whole company).
+        PUT {project_id, screen, kind: export|import, columns: [{field, header}] | null}
+        (null = remove: the project follows the company, the company every field)."""
+        from app.models.tenancy.master import ExcelColumnSetting
+
+        from .excel_columns import KINDS, availability, check_screen, clean_columns, settings_json
+
+        company = self.get_object()
+        alias = self._alias(company)
+        data = request.data if request.method == "PUT" else request.query_params
+        project_id = str(data.get("project_id") or "")
+        if project_id and not live_projects(alias).filter(pk=project_id).exists():
+            return Response({"detail": "Project not found."}, status=404)
+        projects = [{"id": p.pk, "name": p.name} for p in live_projects(alias).order_by("name")]
+        # Fields hidden in Permissions & fields / removed from the database.
+        unavailable = availability(company, project_id, projects)
+        if request.method == "PUT":
+            screen, kind = str(request.data.get("screen") or ""), request.data.get("kind")
+            check_screen(screen)
+            if kind not in KINDS:
+                raise ValidationError({"kind": "Use export or import."})
+            key = {"company": company, "project_id": project_id, "screen": screen, "kind": kind}
+            if request.data.get("columns") is None:
+                ExcelColumnSetting.objects.filter(**key).delete()
+            else:
+                if unavailable.get(screen, {}).get("off"):
+                    raise ValidationError({"screen": unavailable[screen]["off"] + "."})
+                blocked = unavailable.get(screen, {}).get(kind, {})
+                ExcelColumnSetting.objects.update_or_create(
+                    **key, defaults={"columns": clean_columns(screen, kind, request.data["columns"], blocked)})
+        return Response({
+            "projects": projects,
+            "project_id": project_id,
+            "settings": settings_json(company, project_id),
+            "availability": unavailable,
+            # screens with a project-level row, per project (for the overview)
+            "project_overrides": sorted({
+                f"{row.project_id}|{row.screen}" for row in ExcelColumnSetting.objects.filter(
+                    company=company).exclude(project_id="")}),
+        })
+
+    @action(detail=True, methods=["get", "put"], url_path="print-templates")
+    def print_templates(self, request, pk=None):
+        """GET: the company's projects and which template each prints every report with.
+        PUT {report_code, project_id ("" = whole company), template (id | null = remove)}."""
+        company = self.get_object()
+        if request.method == "PUT":
+            code = check_report(str(request.data.get("report_code") or ""))
+            project_id = str(request.data.get("project_id") or "")
+            if project_id and not live_projects(self._alias(company)).filter(pk=project_id).exists():
+                return Response({"detail": "Project not found."}, status=404)
+            template_id = request.data.get("template")
+            if template_id in (None, ""):
+                PrintTemplateAssignment.objects.filter(
+                    company=company, project_id=project_id, report_code=code).delete()
+            else:
+                template = PrintTemplate.objects.filter(pk=template_id, report_code=code).first()
+                if not template:
+                    return Response({"detail": "Template not found for this report."}, status=400)
+                PrintTemplateAssignment.objects.update_or_create(
+                    company=company, project_id=project_id, report_code=code,
+                    defaults={"template": template})
+        projects = [{"id": p.pk, "name": p.name}
+                    for p in live_projects(self._alias(company)).order_by("name")]
+        assignments = [
+            {"project_id": a.project_id, "report_code": a.report_code, "template": a.template_id}
+            for a in PrintTemplateAssignment.objects.filter(company=company)
+        ]
+        effective = {}
+        for report in reports_json():
+            for project_id in [""] + [p["id"] for p in projects]:
+                template, source = resolve_template(company, project_id, report["code"])
+                effective[f'{report["code"]}|{project_id}'] = {
+                    "template": template.pk if template else None, "source": source}
+        return Response({"projects": projects, "assignments": assignments, "effective": effective})
 
 
 class ExtraRecordPurchaseViewSet(SuperAdminMixin, viewsets.ModelViewSet):
@@ -477,7 +582,7 @@ class PlanChangeRequestViewSet(SuperAdminMixin, viewsets.ReadOnlyModelViewSet):
 
 class DataTreeView(SuperAdminMixin, APIView):
     def get(self, request):
-        return Response(data_tree())
+        return Response(data_tree(request))
 
 
 class DataRecordsView(SuperAdminMixin, APIView):
@@ -532,3 +637,93 @@ class DataRecordRestoreView(DataRecordsView):
             return Response({"detail": "Company not found."}, status=404)
         row = t.restore(pk)
         return Response(t.to_json([row])[0])
+
+
+class PrintTemplateViewSet(SuperAdminMixin, viewsets.ViewSet):
+    """/api/super/print-templates/ — the super admin's print designs.
+
+    ?report=<code> filters. One default template per report (used by every
+    company/project without an assignment)."""
+
+    def _get(self, pk):
+        template = PrintTemplate.objects.filter(pk=pk).first()
+        if not template:
+            raise NotFound("Template not found.")
+        return template
+
+    def _save(self, template, data):
+        code = check_report(str(data.get("report_code") or template.report_code or ""))
+        name = str(data.get("name", template.name) or "").strip()[:100]
+        if not name:
+            raise ValidationError({"name": "Name is required."})
+        if template.pk and code != template.report_code:
+            raise ValidationError({"report_code": "A template's report can't be changed."})
+        template.report_code, template.name = code, name
+        template.description = str(data.get("description", template.description) or "").strip()[:255]
+        if "layout" in data:
+            template.layout = clean_layout(code, data.get("layout"))
+        elif not template.pk:
+            template.layout = clean_layout(code, {})
+        make_default = data.get("is_default") is True or not PrintTemplate.objects.filter(
+            report_code=code, is_default=True).exclude(pk=template.pk).exists()
+        with transaction.atomic():
+            if make_default:
+                PrintTemplate.objects.filter(report_code=code, is_default=True).exclude(
+                    pk=template.pk).update(is_default=False)
+                template.is_default = True
+            template.save()
+        return Response(self._json(template), status=200)
+
+    def _json(self, template):
+        data = template_json(template)
+        data["assigned_count"] = template.assignments.count()
+        return data
+
+    def list(self, request):
+        qs = PrintTemplate.objects.all()
+        if request.query_params.get("report"):
+            qs = qs.filter(report_code=request.query_params["report"])
+        return Response({"reports": reports_json(), "templates": [self._json(t) for t in qs]})
+
+    def retrieve(self, request, pk=None):
+        return Response(self._json(self._get(pk)))
+
+    def create(self, request):
+        response = self._save(PrintTemplate(), request.data)
+        response.status_code = 201
+        return response
+
+    def partial_update(self, request, pk=None):
+        return self._save(self._get(pk), request.data)
+
+    update = partial_update
+
+    def destroy(self, request, pk=None):
+        template = self._get(pk)
+        if template.is_default:
+            return Response({"detail": "This is the default template. Make another one the default first."},
+                            status=400)
+        used = template.assignments.count()
+        if used and request.query_params.get("force") != "1":
+            return Response({"detail": f"Assigned {used} time(s). Companies using it fall back to the default.",
+                             "assigned_count": used}, status=409)
+        template.delete()
+        return Response(status=204)
+
+    @action(detail=True, methods=["post"])
+    def duplicate(self, request, pk=None):
+        source = self._get(pk)
+        copy = PrintTemplate.objects.create(
+            report_code=source.report_code, name=f"{source.name} (copy)"[:100],
+            description=source.description, layout=clean_layout(source.report_code, source.layout))
+        return Response(self._json(copy), status=201)
+
+
+class ExcelScreensView(SuperAdminMixin, APIView):
+    """GET /api/super/excel-screens/ — every module -> sub-module with the
+    fields it can export to / import from Excel (app/tenancy/excel_columns.py)."""
+
+    def get(self, request):
+        from .excel_columns import screens_tree
+
+        return Response({"modules": screens_tree()})

@@ -393,13 +393,21 @@ export default function WardForm() {
   // auto-resolves Country/Continent (see onValueChange below) for the case
   // where the record was saved with a state whose country wasn't set yet.
   useEffect(() => {
-    if (!countryId) {
+    // Same rule as effectiveCountryId below: editing a ward, the country shown
+    // is the saved one until the user picks another — list its states too.
+    const rec = (k: "continent" | "country") => normalizeNullable(
+      wardRecordData?.[`${k}_unique_id` as keyof WardWithRelations] as string
+      ?? wardRecordData?.[`${k}_id` as keyof WardWithRelations] as string
+      ?? wardRecordData?.[k as keyof WardWithRelations] as string) ?? "";
+    const currentCountryId = countryId || pendingCountry
+      || (continentId === rec("continent") ? rec("country") : "");
+    if (!currentCountryId) {
       setFilteredStates([]);
       return;
     }
 
     const filt = allStates
-      .filter((s) => s.isActive && s.countryId === countryId)
+      .filter((s) => s.isActive && s.countryId === currentCountryId)
       .map((s) => ({ value: s.id, label: s.name }));
 
     const ensureState = pendingState || stateId;
@@ -413,10 +421,16 @@ export default function WardForm() {
     }
 
     setFilteredStates(filt);
-  }, [countryId, allStates, stateId, pendingState, wardRecordData]);
+  }, [countryId, pendingCountry, continentId, allStates, stateId, pendingState, wardRecordData]);
 
   useEffect(() => {
-    const effectiveStateId = stateId || pendingState;
+    const recId = (k: "country" | "state") => normalizeNullable(
+      wardRecordData?.[`${k}_unique_id` as keyof WardWithRelations] as string
+      ?? wardRecordData?.[`${k}_id` as keyof WardWithRelations] as string
+      ?? wardRecordData?.[k as keyof WardWithRelations] as string) ?? "";
+    const shownCountryId = countryId || pendingCountry || recId("country");
+    const effectiveStateId = stateId || pendingState
+      || (shownCountryId === recId("country") ? recId("state") : "");
     if (!effectiveStateId) {
       setFilteredDistricts([]);
       return;
@@ -438,12 +452,17 @@ export default function WardForm() {
     }
 
     setFilteredDistricts(filt);
-  }, [stateId, pendingState, allDistricts, districtId, pendingDistrict, wardRecordData]);
+  }, [stateId, pendingState, countryId, pendingCountry, allDistricts, districtId, pendingDistrict, wardRecordData]);
 
   useEffect(() => {
     // Always keep the currently-selected city visible even when districtId is empty/mismatched
     const ensureCity = pendingCity || cityId;
-    const effectiveDistrictId = districtId || pendingDistrict;
+    const recordDistrict = normalizeNullable(
+      wardRecordData?.district_unique_id ?? wardRecordData?.district_id ?? wardRecordData?.district) ?? "";
+    const recordState = normalizeNullable(
+      wardRecordData?.state_unique_id ?? wardRecordData?.state_id ?? wardRecordData?.state) ?? "";
+    const effectiveDistrictId = districtId || pendingDistrict
+      || (!stateId || stateId === recordState ? recordDistrict : "");
 
     if (!effectiveDistrictId && !ensureCity) {
       setFilteredCities([]);
@@ -466,7 +485,7 @@ export default function WardForm() {
     }
 
     setFilteredCities(filt);
-  }, [districtId, pendingDistrict, allCities, cityId, pendingCity, wardRecordData]);
+  }, [districtId, pendingDistrict, stateId, allCities, cityId, pendingCity, wardRecordData]);
 
   useEffect(() => {
     // Always keep the currently-selected zone visible even when cityId is empty/mismatched

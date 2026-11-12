@@ -30,10 +30,13 @@ export type BulkUploadResponse = {
 export const runBulkUpload = async <R = BulkUploadResponse>(
   resourceApi: ActionApi,
   formData: FormData,
+  /** Query params, e.g. `{ project_id }` (picks the project's Excel import setting). */
+  params?: Record<string, string>,
 ): Promise<R> =>
   resourceApi.action<R>("bulk-upload", formData, {
     // Let axios emit "multipart/form-data; boundary=..." itself.
     headers: { "Content-Type": undefined },
+    ...(params ? { params } : {}),
   });
 
 export type ExportColumn = { header: string; field: string };

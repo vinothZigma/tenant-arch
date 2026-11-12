@@ -199,6 +199,9 @@ export const persistLoginSession = (payload: LoginPayload, isRestore = false): v
   setStoredPermissions(payload.permissions ?? {});
   setStoredPermissionDetails(payload.permission_details ?? {});
   setStoredColumnPermissions(payload.column_permissions ?? {});
+  const version = (payload as { permission_version?: string }).permission_version;
+  if (version) sessionStore.setItem("permission_version", String(version));
+  else sessionStore.removeItem("permission_version");
 
   if (profile) {
     sessionStore.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));

@@ -111,8 +111,44 @@ class StaffAccessConfigurationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
             if not own_project_id:
                 return qs.none()
             qs = qs.filter(project_ids__contains=own_project_id)
+        else:
+            # Company admins: only staff of the projects they may open.
+            qs = self._within_visible_projects(qs)
 
+        # The hidden developer login is never listed to anyone else.
+        if not getattr(self.request.user, "is_developer", False):
+            developer_ids = list(Staffcreation.objects.filter(is_developer=True)
+                                 .values_list("staff_unique_id", flat=True))
+            if developer_ids:
+                qs = qs.exclude(staff_id__in=developer_ids)
+
+        # The list's Company & project filter.
+        project_id_param = (
+            self.request.query_params.get("project_id")
+            or self.request.query_params.get("project_unique_id")
+            or self.request.query_params.get("project")
+        )
+        if project_id_param and project_id_param != "none":
+            qs = qs.filter(project_ids__contains=project_id_param)
         return qs
+
+    def _within_visible_projects(self, qs):
+        """Configurations naming at least one project the caller may open.
+        A configuration with no projects (= every project) only shows to a
+        caller who sees every project of the company."""
+        from app.viewsets.superadmin_masters.project_management import visible_project_ids
+
+        allowed = visible_project_ids(self.request)
+        if allowed is None:
+            return qs
+        all_projects = set(Project.objects.filter(
+            company_id=self._company_uid(self._company()), is_deleted=False).values_list("unique_id", flat=True))
+        match = Q(pk__in=[])
+        for project_id in allowed:
+            match |= Q(project_ids__contains=project_id)
+        if all_projects <= set(allowed):
+            match |= Q(project_ids__isnull=True) | Q(project_ids="")
+        return qs.filter(match)
 
 
     def get_object(self):
@@ -196,6 +232,20 @@ class StaffAccessConfigurationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
 
         if project_id:
             queryset = queryset.filter(project_id=project_id)
+        if not getattr(request.user, "is_developer", False):
+            queryset = queryset.filter(is_developer=False)
+        if not self._is_platform_super_admin():
+            # Only staff of the projects the caller may open.
+            from app.viewsets.superadmin_masters.project_management import visible_project_ids
+
+            allowed = visible_project_ids(request)
+            if allowed is not None:
+                all_projects = set(Project.objects.filter(company_id=company, is_deleted=False)
+                                   .values_list("unique_id", flat=True))
+                match = Q(project_id__in=allowed)
+                if all_projects <= set(allowed):
+                    match |= Q(project_id__isnull=True) | Q(project_id="")
+                queryset = queryset.filter(match)
 
         queryset = queryset.order_by("employee_name")
 

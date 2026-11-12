@@ -28,6 +28,11 @@ class Ward(BaseMaster):
     company_id = models.CharField(max_length=30, null=True, blank=True, db_index=True)
     project_id = models.CharField(max_length=30, null=True, blank=True, db_index=True)
 
+    # Like District/City: the location chain is stored, so Continent/Country
+    # are real fields (listed in Permissions & fields). Filled from the state
+    # on save when not given.
+    continent_id = models.CharField(max_length=30, null=True, blank=True)
+    country_id = models.CharField(max_length=30, null=True, blank=True)
     state_id = models.CharField(max_length=30, null=True, blank=True)
     district_id = models.CharField(max_length=30, null=True, blank=True)
     city_id = models.CharField(max_length=30, null=True, blank=True)
@@ -94,6 +99,16 @@ class Ward(BaseMaster):
                     raise ValidationError(
                         "Each boundary_coordinates point needs latitude and longitude."
                     )
+
+    def save(self, *args, **kwargs):
+        if self.state_id and not (self.country_id and self.continent_id):
+            from app.models.superadmin.common_masters.state import State
+
+            state = State.objects.filter(unique_id=self.state_id).values("country_id", "continent_id").first()
+            if state:
+                self.country_id = self.country_id or state["country_id"]
+                self.continent_id = self.continent_id or state["continent_id"]
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.ward_name

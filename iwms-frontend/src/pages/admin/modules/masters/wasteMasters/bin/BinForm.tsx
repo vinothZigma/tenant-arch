@@ -813,7 +813,7 @@ export default function BinForm() {
         )}
 
         {/* Zone — hidden when the staff has no Zone access, or when Panchayat is selected */}
-        {showZone && !isPanchayatSelected && (
+        {showField("zone_id") && showZone && !isPanchayatSelected && (
           <div>
             <Label>{t("admin.nav.zone")}</Label>
             <Select

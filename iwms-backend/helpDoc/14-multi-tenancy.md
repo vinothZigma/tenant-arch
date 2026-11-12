@@ -129,6 +129,76 @@ projects.
   then `python manage.py migrate_tenants`.
 * Cache keys include the company DB (`app/tenancy/cache.py`).
 
+## Print templates
+
+The super admin designs how each report prints and picks a design per company
+or project: Console → **Print templates** (tabs *Templates* and *Assign to
+companies*). Tables live in the master DB: `tenancy_print_template` (layout
+JSON) and `tenancy_print_template_assignment` (company, project_id `""` =
+whole company, report, template).
+
+Lookup when a user prints: the project's template → the company's template →
+the report's default template → the built-in layout. Users print from the
+list's **Documents → Print** (Daily Trip Log so far); it fetches
+`GET /api/t/<slug>/ws/print-template/<report>/?project_id=…` and prints the
+filtered rows through a hidden iframe. The console preview and the printout
+use the same renderer, `src/utils/printTemplate.ts` (`buildPrintHtml`).
+
+Adding another report:
+
+1. Add it to `REPORTS` in `app/tenancy/print_templates.py` (code, name,
+   title, columns with stable keys; `numeric: True` for totals). New reports
+   get the 4 sample designs from `ensure_sample_templates()`.
+2. On the list page, add `print: {...}` to `documentActions` and call
+   `printReport({report, projectId, rows, filters})` (`src/utils/printReport.ts`)
+   with rows keyed by those column keys.
+
+## Excel columns (import / export)
+
+The super admin chooses, per company or per project and per module →
+sub-module, which fields go into Excel: Console → **Excel columns**. Pick the
+company, *Applies to* (whole company or one project), a sub-module on the
+left, then the **Export** or **Import template** tab: tick fields, rename
+their Excel header, set the order, Save. *Remove* drops the row (a project
+then follows the company, the company gets every field again). Required
+import fields are always included.
+
+Table (master DB): `tenancy_excel_column_setting` (company, project_id `""` =
+whole company, screen, kind `export`/`import`, columns `[{field, header}]`).
+Lookup: project row → company row → every field (the behaviour before).
+
+Code: `app/tenancy/excel_columns.py`.
+
+* Fields per screen = the screen's **form** fields, in the form's order and
+  with its labels (as in Permissions & fields; form fields hidden in
+  Modules → forms left out). No `unique_id` / `created_at` / API-only
+  columns. Export writes what the list shows for a field (`source`:
+  `continent_id` → `continent_name`); import keeps the fields the create API
+  accepts (tenancy and server-stamped fields not offered). A screen with no
+  form definition uses its create serializer's fields. Older settings that
+  name API fields are mapped to the form field (`normalize_columns`).
+  Dashboards / maps (no table) are left out. Built per module, cached 30 s.
+* Enforced on the server: `POST /exports/excel/` writes only the enabled
+  export columns, whatever the browser sends; `ImportColumnsMiddleware` drops
+  disabled columns from every `…/bulk-upload/` CSV (lookup columns filled by
+  name, e.g. `ward_name` for `ward_id`, count as the field). The project is
+  the request's `project_id` (query, form or export params), else the user's.
+* Unavailable fields: a field hidden for the project in **Permissions &
+  fields** (`CompanyUserScreenColumnPermission` view off) or removed in
+  **Edit project → Modules** can't be chosen: the console shows it greyed out
+  with the reason, saving it is refused, and exports / templates / uploads
+  leave it out even if a setting saved earlier still lists it
+  (`availability()`, `effective_columns()`).  For the whole company a
+  field is blocked when it is blocked in any project (the company setting
+  reaches every project); a project that allows it enables it in its own
+  setting. A switched-off sub-module shows a message instead of
+  the editor. The developer login is exempt (it sees every field).
+* List pages: `SafeDataTable` reads `GET ws/excel-columns/?path=&project_id=`
+  (`src/utils/excelColumns.ts`) for *Download template* (enabled fields,
+  headers as set), the upload mapping, and *Excel (current page)*. Customer
+  and Vehicle Creation keep their own templates, filtered through
+  `pageImportTemplate` / `pageSheetToUploadCsv`.
+
 ## Commands
 
 | Command | |
@@ -174,4 +244,4 @@ The DB user needs CREATE/DROP DATABASE (or grants on the master DB and
 `tests/tenancy/` (SQLite, company DBs as temp files): router/slug rules,
 provisioning, isolation (company A's token on company B → 401), project caps
 for staff, the limit under two parallel creates, billing, open workspace,
-custom fields, logo checks, data browser. Use the `tenant_dirs` fixture.
+custom fields, logo checks, print templates, Excel columns (`test_excel_columns.py`: catalog, lookup, export and upload enforcement), no super-admin data browser (removed: the developer login sees company data). Use the `tenant_dirs` fixture.

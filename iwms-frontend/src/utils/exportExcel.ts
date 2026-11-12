@@ -93,12 +93,27 @@ const flattenRecord = (
     {},
   );
 
+/** `record.a.b` for the field "a.b". */
+const pickField = (record: ExportRow, field: string): unknown =>
+  field.split(".").reduce<unknown>(
+    (value, part) =>
+      value && typeof value === "object"
+        ? (value as Record<string, unknown>)[part]
+        : undefined,
+    record,
+  );
+
 export const exportRecordsToExcel = async (
   records: ExportRow[],
   filename: string,
   sheetName = "Export",
   /** Extra fields for the (single) download audit entry, e.g. `{ scope }`. */
   auditDetails?: Record<string, unknown>,
+  /**
+   * Pick and name the columns (dotted fields, headers kept as given), e.g.
+   * the company's Excel export setting; default: every field, flattened.
+   */
+  columns?: { header: string; field: string }[] | null,
 ) => {
   recordExcelAudit("download_all_excel", {
     file_name: filename,
@@ -106,10 +121,17 @@ export const exportRecordsToExcel = async (
     ...auditDetails,
   });
   const XLSX = await loadXlsx();
-  const rows = records.map((record) =>
-    flattenRecord(record as Record<string, unknown>),
-  );
-  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const rows = columns?.length
+    ? records.map((record) =>
+        columns.reduce<Record<string, ExportValue>>((acc, column) => {
+          acc[column.header] = serialiseValue(pickField(record, column.field));
+          return acc;
+        }, {}),
+      )
+    : records.map((record) => flattenRecord(record as Record<string, unknown>));
+  const worksheet = XLSX.utils.json_to_sheet(rows, {
+    header: columns?.length ? columns.map((column) => column.header) : undefined,
+  });
   const workbook = XLSX.utils.book_new();
 
   XLSX.utils.book_append_sheet(workbook, worksheet, sheetName.slice(0, 31));

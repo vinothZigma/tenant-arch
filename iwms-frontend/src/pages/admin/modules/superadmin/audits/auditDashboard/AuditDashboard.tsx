@@ -361,6 +361,7 @@ export default function AuditDashboard() {
 
   const [current, setCurrent] = useState<AuditModuleKey>("common");
   const [days, setDays] = useState<number>(30);
+  const [companyId, setCompanyId] = useState(ALL);
   const [projectId, setProjectId] = useState(ALL);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -384,15 +385,28 @@ export default function AuditDashboard() {
     () => ({
       module: current,
       days,
+      ...(companyId ? { company_id: companyId } : {}),
       ...(projectId ? { project_id: projectId } : {}),
     }),
-    [current, days, projectId],
+    [current, days, companyId, projectId],
   );
 
   useEffect(() => {
     auditDashboardApi
       .read("filter-options")
-      .then((data) => setOptions(data as AuditDashboardFilterOptions))
+      .then((data) => {
+        const opts = data as AuditDashboardFilterOptions;
+        setOptions(opts);
+        // Open on the company + project like the other screens: a single
+        // company (a company login) is preselected, and so is its project
+        // when there is only one.
+        if (opts.companies.length === 1) {
+          const onlyCompany = opts.companies[0].unique_id;
+          setCompanyId(onlyCompany);
+          const own = opts.projects.filter((p) => p.company_id === onlyCompany);
+          if (own.length === 1) setProjectId(own[0].unique_id);
+        }
+      })
       .catch(() => {
         // Non-fatal: the scope dropdown just offers "All projects".
       });
@@ -488,6 +502,7 @@ export default function AuditDashboard() {
         format: "csv",
         audit: current,
         days,
+        company_id: companyId || null,
         project_id: projectId || null,
         search: search || null,
         rows: rows.length,
@@ -497,7 +512,7 @@ export default function AuditDashboard() {
     } finally {
       setExporting(false);
     }
-  }, [current, days, module, projectId, scopeParams, search, t]);
+  }, [current, days, module, companyId, projectId, scopeParams, search, t]);
 
   /* ---------- Charts ---------- */
 
@@ -585,11 +600,12 @@ export default function AuditDashboard() {
   const projectsByCompany = useMemo(() => {
     const groups = new Map<string, AuditDashboardFilterOptions["projects"]>();
     for (const project of options?.projects ?? []) {
+      if (companyId && project.company_id !== companyId) continue;
       const company = project.company_name ?? project.company_id;
       groups.set(company, [...(groups.get(company) ?? []), project]);
     }
     return [...groups.entries()];
-  }, [options]);
+  }, [options, companyId]);
 
   return (
     <div className="p-3 text-sm text-[#1d2b22] dark:text-[#e6efe8]">
@@ -617,6 +633,27 @@ export default function AuditDashboard() {
             ))}
           </select>
           <select
+            aria-label="Company"
+            className={selectClass}
+            value={companyId}
+            disabled={(options?.companies.length ?? 0) <= 1}
+            onChange={(e) => {
+              setCompanyId(e.target.value);
+              // A project belongs to one company.
+              setProjectId(ALL);
+              setPage(1);
+            }}
+          >
+            {(options?.companies.length ?? 0) !== 1 && (
+              <option value={ALL}>All companies</option>
+            )}
+            {(options?.companies ?? []).map((c) => (
+              <option key={c.unique_id} value={c.unique_id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <select
             aria-label="Project"
             className={selectClass}
             value={projectId}
@@ -636,7 +673,7 @@ export default function AuditDashboard() {
                     ))}
                   </optgroup>
                 ))
-              : (options?.projects ?? []).map((p) => (
+              : projectsByCompany.flatMap(([, projects]) => projects).map((p) => (
                   <option key={p.unique_id} value={p.unique_id}>
                     {p.name}
                   </option>

@@ -28,6 +28,9 @@ class ProjectStaffHierarchySerializer(TenancyReadSerializerMixin, serializers.Mo
     )
 
     project_name = serializers.SerializerMethodField()
+    # The project's company, so lists and forms can show/filter by company.
+    company_id = serializers.SerializerMethodField()
+    company_name = serializers.SerializerMethodField()
     staffusertype_name = serializers.SerializerMethodField()
     reports_to_staffusertype_name = serializers.SerializerMethodField()
 
@@ -40,6 +43,22 @@ class ProjectStaffHierarchySerializer(TenancyReadSerializerMixin, serializers.Mo
     def get_project_name(self, obj):
         project = related(obj, "project", Project, "project_id")
         return project.name if project else None
+
+    def get_company_id(self, obj):
+        project = related(obj, "project", Project, "project_id")
+        return project.company_id if project else None
+
+    def get_company_name(self, obj):
+        from app.models.superadmin_masters.company import Company
+
+        company_id = self.get_company_id(obj)
+        if not company_id:
+            return None
+        names = self.context.setdefault("_company_names", {})
+        if company_id not in names:
+            names[company_id] = Company.objects.filter(unique_id=company_id).values_list(
+                "name", flat=True).first()
+        return names[company_id]
 
     def get_staffusertype_name(self, obj):
         staffusertype = related(obj, "staffusertype", StaffUserType, "staffusertype_id")

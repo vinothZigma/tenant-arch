@@ -8,6 +8,23 @@ from rest_framework import filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from app.utils.bulk_upload_mixin import bulk_upload_response
+from app.tenancy.iwms_forms import configured_forms
+
+# Form (permission-catalog screen) whose configuration says which customer
+# fields are required.
+CUSTOMER_FORM = "customercreations"
+
+
+def customer_required_fields():
+    """{field: label} the customer form requires (Modules -> form fields:
+    the admin's setting, else the model default) -- the same list the Excel
+    columns page marks Required. company/project come from the upload."""
+    for form in configured_forms("customers"):
+        if form["name"] == CUSTOMER_FORM:
+            return {f["name"]: f["label"] for f in form["fields"]
+                    if f["required"] and not f["hidden"]
+                    and f["name"] not in ("company_id", "project_id")}
+    return {}
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from app.models.superadmin_masters.company import Company
@@ -559,6 +576,8 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
             if not project:
                 return Response({"error": "Invalid project_id"}, status=400)
 
+            required_fields = customer_required_fields()
+
             for index, row in enumerate(rows, start=1):
 
                 # ✅ SUPPORT BOTH NAME & ID
@@ -585,17 +604,8 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                 block_no = clean(row.get("block_no"))
                 flat_no = clean(row.get("flat_no"))
 
-                # ✅ Only House No (building_no) and Sqft are mandatory for bulk upload.
                 building_no = clean(row.get("building_no"))
                 sqft = clean(row.get("sqft"))
-
-                if not building_no:
-                    errors.append({"row": index, "error": "House No (building_no) is required"})
-                    continue
-
-                if not sqft:
-                    errors.append({"row": index, "error": "Sqft is required"})
-                    continue
 
                 # A misspelt or unknown waste type used to be dropped silently,
                 # so the row imported with no waste types and the uploader had
@@ -617,8 +627,8 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                     "customer_name": clean(row.get("customer_name")),
                     "contact_no": clean(row.get("contact_no")),
 
-                    "building_no": building_no,
-                    "sqft": sqft,
+                    "building_no": building_no or None,
+                    "sqft": sqft or None,
                     "street": clean(row.get("street")),
                     "area": clean(row.get("area")),
 
@@ -649,6 +659,17 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                     "id_proof_type": clean(row.get("id_proof_type")),
                     "id_no": clean(row.get("id_no")),
                 }
+
+                # The fields the form configuration makes required (the
+                # same rule the create API enforces); nothing is hardcoded.
+                missing = [label for name, label in required_fields.items()
+                           if (data.get(name) if name in data else clean(row.get(name))) in (None, "", [])]
+                if missing:
+                    errors.append({
+                        "row": index,
+                        "error": ", ".join(missing) + (" is" if len(missing) == 1 else " are") + " required",
+                    })
+                    continue
 
                 serializer = self.get_serializer(data=data)
 

@@ -13,6 +13,8 @@ export type ProjectStaffHierarchyRow = {
   unique_id: string;
   project_id: string;
   project_name?: string;
+  company_id?: string | null;
+  company_name?: string | null;
   staffusertype_id: string;
   staffusertype_name?: string;
   reports_to_staffusertype_id: string | null;

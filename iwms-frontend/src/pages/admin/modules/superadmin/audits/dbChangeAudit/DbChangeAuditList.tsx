@@ -18,6 +18,7 @@ import { FormSelect } from "@/components/common/FormSelect";
 import { FilterSection } from "@/components/common/ListToolbar";
 import { useDateRangeFilter } from "@/components/filters/useDateRangeFilter";
 import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
 import { combineFilters, useOptionFilter } from "@/components/filters/useOptionFilter";
 import DbChangeAuditDetail from "./DbChangeAuditDetail";
 import { formatDateTime, OPERATION_COLORS } from "./format";
@@ -29,9 +30,6 @@ const toRecordList = (value: unknown): DbChangeAuditRecord[] => {
   }
   return [];
 };
-
-const nameOf = (options: { label: string; value: string }[], value: string) =>
-  options.find((option) => option.value === value)?.label ?? value;
 
 const OPERATION_OPTIONS = [
   { label: "Created", value: "INSERT" },
@@ -58,24 +56,25 @@ export default function DbChangeAuditList() {
 
   const toOptions = (items?: { unique_id: string; name: string }[]) =>
     (items ?? []).map((item) => ({ label: item.name, value: item.unique_id }));
-  const companyOptions = useMemo(() => toOptions(filterOptions?.companies), [filterOptions]);
-  const projectOptions = useMemo(() => toOptions(filterOptions?.projects), [filterOptions]);
   const tableOptions = useMemo(() => toOptions(filterOptions?.tables), [filterOptions]);
 
   const resetPage = () => setFirst(0);
 
-  // Company → Project and Table, edited in the Filters panel as a draft and
-  // sent once applied.
+  // Company → Project, the same filter as every other list: it opens on the
+  // signed-in company (and its only project).
+  const companyProject = useCompanyProjectFilter(resetPage);
+  const { companyId: companyFilter, projectId: projectFilter } = companyProject;
+  const draftCompany = companyProject.selection.companyUniqueId;
+
+  // Table, edited in the Filters panel as a draft and sent once applied.
   const scope = useDraftFilter({
-    empty: { company: "", project: "", table: "" },
+    empty: { table: "" },
     chips: {
-      company: { label: "Company", format: (v) => nameOf(companyOptions, v), clears: ["project"] },
-      project: { label: "Project", format: (v) => nameOf(projectOptions, v) },
       table: { label: "Table", format: (v) => v },
     },
     onAppliedChange: resetPage,
   });
-  const { company: companyFilter, project: projectFilter, table: tableFilter } = scope.applied;
+  const { table: tableFilter } = scope.applied;
   const draft = scope.draft;
 
   const operation = useOptionFilter({
@@ -140,7 +139,7 @@ export default function DbChangeAuditList() {
     const loadFilterOptions = async () => {
       try {
         const data = (await dbChangeAuditApi.read("filter-options", {
-          params: draft.company ? { company_id: draft.company } : {},
+          params: draftCompany ? { company_id: draftCompany } : {},
         })) as unknown as DbChangeAuditFilterOptions;
         if (mounted && data) setFilterOptions(data);
       } catch {
@@ -151,7 +150,7 @@ export default function DbChangeAuditList() {
     return () => {
       mounted = false;
     };
-  }, [draft.company]);
+  }, [draftCompany]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -194,24 +193,6 @@ export default function DbChangeAuditList() {
 
   const scopeField = (
     <>
-      <FilterSection label="Company & project">
-        <div className="grid grid-cols-2 gap-2">
-          <FormSelect
-            label="Company"
-            value={draft.company}
-            onChange={(value) => scope.setDraft((d) => ({ ...d, company: value, project: "" }))}
-            options={companyOptions}
-            placeholder={t("common.all")}
-          />
-          <FormSelect
-            label="Project"
-            value={draft.project}
-            onChange={(value) => scope.setField("project", value)}
-            options={projectOptions}
-            placeholder={t("common.all")}
-          />
-        </div>
-      </FilterSection>
       <FilterSection label="Table">
         <FormSelect
           label="Table"
@@ -252,7 +233,7 @@ export default function DbChangeAuditList() {
               searchPlaceholder="Search table, record id, DB user…"
             />
           }
-          filterPanel={combineFilters({ ...scope, field: scopeField }, operation, changedOn)}
+          filterPanel={combineFilters(companyProject, { ...scope, field: scopeField }, operation, changedOn)}
           loadExportRows={loadAllExportRows}
           value={records}
           dataKey="id"

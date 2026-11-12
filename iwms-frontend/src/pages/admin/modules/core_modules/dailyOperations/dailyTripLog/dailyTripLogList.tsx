@@ -32,6 +32,8 @@ import { locationColumn } from "@/components/common/LocationColumn";
 import { ListPageHeader } from "@/components/common/ListPageHeader";
 import { ActionMenu } from "@/components/ui/ActionMenu";
 import { downloadRecordsPdf } from "@/utils/exportPdf";
+import { printReport } from "@/utils/printReport";
+import type { PrintReportDef } from "@/utils/printTemplate";
 import { exportRecordsToExcel, getAdminScreenExcelFilename } from "@/utils/exportExcel";
 import { formatTimeOnly } from "@/utils/formatTime";
 import { useScreenAccess } from "@/contexts/screenPermission";
@@ -44,6 +46,35 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 /* Status tabs above the table — "" = every status. */
+/* Print: columns of the "daily-trip-log" report (backend REPORTS in
+   app/tenancy/print_templates.py) and the export-row label each one reads.
+   The layout itself (logo, title, columns, signatures …) comes from the
+   template the super admin assigned to this company / project. */
+const PRINT_COLUMNS: Array<[key: string, label: string, numeric?: boolean]> = [
+  ["trip_id", "Trip ID"],
+  ["trip_assignment", "Trip Assignment"],
+  ["trip_date", "Trip Date"],
+  ["location", "Location"],
+  ["zone", "Zone"],
+  ["driver", "Driver"],
+  ["operator", "Operator"],
+  ["vehicle", "Vehicle"],
+  ["log_status", "Log Status"],
+  ["collection_status", "Collection Status"],
+  ["collection_time", "Collection Time"],
+  ["point_type", "Point Type"],
+  ["point", "Collection Point / Customer"],
+  ["waste_type", "Waste Type"],
+  ["weight_kg", "Collected Weight (kg)", true],
+  ["is_collected", "Is Collected"],
+];
+const TRIP_LOG_PRINT_REPORT: PrintReportDef = {
+  code: "daily-trip-log",
+  name: "Daily Trip Log",
+  title: "Daily Trip Log Report",
+  columns: PRINT_COLUMNS.map(([key, label, numeric]) => ({ key, label, numeric })),
+};
+
 const STATUS_TABS: Array<{ key: string; label: string; dot: string }> = [
   { key: "", label: "All", dot: "bg-slate-400" },
   { key: "Unverified", label: "Unverified", dot: "bg-gray-400" },
@@ -877,7 +908,7 @@ export default function DailyTripLogList() {
   const [isVerifying, setIsVerifying] = useState(false);
   const [globalFilterValue, setGlobalFilterValue] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
-  const [exporting, setExporting] = useState<"excel" | "pdf" | null>(null);
+  const [exporting, setExporting] = useState<"excel" | "pdf" | "print" | null>(null);
   const [summary, setSummary] = useState<TripLogSummary>(EMPTY_SUMMARY);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryVersion, setSummaryVersion] = useState(0);
@@ -1277,7 +1308,7 @@ export default function DailyTripLogList() {
      dataset fresh from the server (independent of whatever page is currently
      on screen), then apply the same collectionType post-filter used for the
      on-screen rows, and explode into per-point/customer rows. ── */
-  const handleDownload = async (format: "excel" | "pdf") => {
+  const handleDownload = async (format: "excel" | "pdf" | "print") => {
     setExporting(format);
     try {
       const exportRaw = toRecordList(
@@ -1300,7 +1331,32 @@ export default function DailyTripLogList() {
         });
         return;
       }
-      if (format === "excel") {
+      if (format === "print") {
+        const projectLabel = projectId
+          ? String(companyProject.selection.projects.find((p) => p.value === projectId)?.label ?? "")
+          : "";
+        const filters = [
+          projectLabel,
+          tripFilters.applied.date ? `Trip date ${tripFilters.applied.date.split("-").reverse().join("-")}` : "",
+          wasteTypeFilter.length
+            ? `Waste type ${wasteTypeFilter
+                .map((v) => wasteTypeOptions.find((o) => o.value === v)?.label ?? v)
+                .join(", ")}`
+            : "",
+          collectionType === "bin" ? "Bin collection" : collectionType === "household" ? "Household collection" : "",
+          statusFilter,
+          searchTerm ? `Search "${searchTerm}"` : "",
+        ].filter(Boolean).join(" · ");
+        await printReport({
+          report: TRIP_LOG_PRINT_REPORT,
+          projectId: projectId || undefined,
+          projectName: projectLabel,
+          filters,
+          rows: exportRows.map((row) =>
+            Object.fromEntries(PRINT_COLUMNS.map(([key, label]) => [key, row[label]])),
+          ),
+        });
+      } else if (format === "excel") {
         await exportRecordsToExcel(
           exportRows,
           getAdminScreenExcelFilename("all"),
@@ -1465,6 +1521,11 @@ export default function DailyTripLogList() {
             downloadPdf: {
               onClick: () => void handleDownload("pdf"),
               busy: exporting === "pdf",
+              disabled: exporting !== null || totalRecords === 0,
+            },
+            print: {
+              onClick: () => void handleDownload("print"),
+              busy: exporting === "print",
               disabled: exporting !== null || totalRecords === 0,
             },
           }}

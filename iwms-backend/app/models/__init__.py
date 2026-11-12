@@ -16,6 +16,7 @@ from .superadmin.common_masters.state import State
 # ============================================================
 from .tenancy.master import (
     Plan, Module, CompanyModule, PlanModuleLimit, ExtraRecordPurchase, PlanChangeRequest, FormConfig,
+    PrintTemplate, PrintTemplateAssignment, ExcelColumnSetting,
 )
 from .tenancy.tenant import (
     ProjectModule, ProjectAdmin, ModulePermission, ModuleTable, ModuleColumn, ModuleLock, ExtraFieldValue,

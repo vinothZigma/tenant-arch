@@ -2,7 +2,7 @@ import type { ProjectStaffHierarchyRow } from "./types";
 import { createCrudRoutePaths } from "@/utils/routePaths";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import Swal from "@/lib/notify";
 import { confirmDeleteWithReason, withDeleteReason } from "@/utils/deleteReason";
 
@@ -22,11 +22,13 @@ import { projectStaffHierarchyApi } from "@/helpers/admin";
 import { FilterBar } from "@/components/common/FilterBar";
 import { useFilterBarFilters } from "@/hooks/useFilterBarFilters";
 import { combineFilters } from "@/components/filters/useOptionFilter";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
 import { filterRowsForExport } from "@/utils/adminListExport";
 import { Can } from "@/contexts/ScreenPermissionContext";
 import { useScreenAccess } from "@/contexts/screenPermission";
 
 const SEARCH_FIELDS = [
+  "company_name",
   "project_name",
   "staffusertype_name",
   "reports_to_staffusertype_name",
@@ -74,6 +76,14 @@ export default function ProjectStaffHierarchyList() {
     statusFilter,
   } = useFilterBarFilters();
 
+  // Company → Project filter (a company login stays on its own company).
+  const restored = useLocation().state as { companyUniqueId?: string; projectId?: string } | null;
+  const companyProject = useCompanyProjectFilter(undefined, {
+    initialCompanyId: restored?.companyUniqueId,
+    initialProjectId: restored?.projectId,
+  });
+  const { companyId, projectId } = companyProject;
+
   const navigate = useNavigate();
   const { canEdit } = useScreenAccess();
   const { encAdmins, encProjectStaffHierarchy } = getEncryptedRoute();
@@ -86,7 +96,7 @@ export default function ProjectStaffHierarchyList() {
   const loadRecords = async () => {
     setIsLoading(true);
     try {
-      const res = await projectStaffHierarchyApi.readAll();
+      const res = await projectStaffHierarchyApi.readAll({ params: companyProject.applied });
       setRows(toRecordList(res));
     } catch {
       Swal.fire(t("common.error"), t("common.fetch_failed"), "error");
@@ -97,7 +107,7 @@ export default function ProjectStaffHierarchyList() {
 
   useEffect(() => {
     void loadRecords();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [companyId, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateStatus = async (row: ProjectStaffHierarchyRow, checked: boolean) => {
     setPendingStatusId(row.unique_id);
@@ -154,7 +164,7 @@ export default function ProjectStaffHierarchyList() {
   const actionTemplate = (row: ProjectStaffHierarchyRow) => (
     <div className="flex justify-center">
       <ActionMenu
-        onEdit={() => navigate(ENC_EDIT_PATH(row.unique_id))}
+        onEdit={() => navigate(ENC_EDIT_PATH(row.unique_id), { state: { companyUniqueId: companyId, projectId } })}
         onDelete={() => void handleDelete(row.unique_id)}
       />
     </div>
@@ -196,13 +206,13 @@ export default function ProjectStaffHierarchyList() {
             })}
             icon="pi pi-plus"
             className="p-button-success"
-            onClick={() => navigate(ENC_NEW_PATH)}
+            onClick={() => navigate(ENC_NEW_PATH, { state: { companyUniqueId: companyId, projectId } })}
           />
         </Can>
       </div>
 
       <DataTable
-        filterPanel={combineFilters(statusFilter)}
+        filterPanel={combineFilters(companyProject, statusFilter)}
         value={rows}
         exportRows={exportRows}
         paginator
@@ -223,10 +233,16 @@ export default function ProjectStaffHierarchyList() {
       >
         <Column header={t("common.s_no")} body={indexTemplate} style={{ width: "5%" }} />
         <Column
+          field="company_name"
+          header={t("admin.nav.company")}
+          sortable
+          style={{ width: "14%" }}
+        />
+        <Column
           field="project_name"
           header={t("admin.nav.project")}
           sortable
-          style={{ width: "24%" }}
+          style={{ width: "18%" }}
         />
         <Column
           field="staffusertype_name"

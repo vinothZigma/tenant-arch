@@ -6,6 +6,7 @@ from rest_framework.response import Response
 
 from app.utils.audit_context import (
     is_platform_super_admin,
+    limit_to_allowed_projects,
     resolve_actor,
     resolve_tenancy,
 )
@@ -100,7 +101,8 @@ class CommonAuditViewSet(
         if not company_uid:
             raise PermissionDenied("Company user required")
 
-        return queryset.filter(company_unique_id=company_uid)
+        queryset = queryset.filter(company_unique_id=company_uid)
+        return limit_to_allowed_projects(queryset, user, "project_unique_id")
 
     def get_queryset(self):
         queryset = self._scoped_base_queryset()

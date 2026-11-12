@@ -44,6 +44,9 @@ export type CrudMetadata = {
 };
 
 export type CrudHelpers<T = any> = {
+  /** The list endpoint, relative to the API root ("/masters/wards/"). */
+  resource: string;
+
   readAll: (config?: AxiosRequestConfig) => Promise<T[]>;
 
   readAllForExport: (config?: AxiosRequestConfig) => Promise<T[]>;
@@ -187,6 +190,8 @@ export const createCrudHelpers = <T = any>(
   };
 
   const helpers: CrudHelpers<T> = {
+    resource,
+
     /* ---------- READ ---------- */
 
     readAll: async (config) => {

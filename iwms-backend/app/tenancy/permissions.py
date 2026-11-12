@@ -57,8 +57,12 @@ def company_permissions(company, project_id):
         if screen and action:
             granted.setdefault(screen, set()).add(action.lower())
 
-    from .iwms_tables import HIDDEN_MODULES
+    from .iwms_tables import HIDDEN_MODULES, enabled_screens, project_states
 
+    # Database level (Edit project → Modules): sub-modules turned off there
+    # are not offered in this project, whatever is granted here.
+    state = project_states(alias).get(project_id)
+    in_project = enabled_screens(state) if state else set()
     modules = []
     for code, module in catalog.MODULES.items():
         if code in HIDDEN_MODULES:
@@ -84,10 +88,13 @@ def company_permissions(company, project_id):
                 "name": f["name"],
                 "label": f["label"],
                 "required": f["required"],   # shown ticked by default; can be unticked
-                "enabled": field_rows.get(f["name"], not field_rows),
+                # A field with no saved setting (e.g. a column added later) shows,
+                # as it does in the IWMS forms.
+                "enabled": field_rows.get(f["name"], True),
             } for f in form["fields"] if not f.get("hidden")]
             entries.append({
                 "name": screen["name"], "label": screen["label"], "available": db_screen is not None,
+                "in_project": screen["name"] in in_project,
                 "actions": [{"name": a, "label": ACTION_LABELS[a], "granted": a in granted.get(screen["name"], ())}
                             for a in _offered(screen)],
                 "fields": fields,
@@ -124,8 +131,10 @@ def save_company_permissions(company, data):
             if db_screen is None:
                 raise ValidationError({"detail": f"{screen['label']} is not set up in this company yet."})
             wanted = [a for a in (wanted or []) if a in _offered(screen)]
-            if any(a != "view" for a in wanted) and "view" not in wanted:
-                wanted.append("view")   # can't add or edit what you can't see
+            # View = shown in the menu; Use = usable without being shown, so
+            # it stands alone. Anything else needs View (can't edit what you can't see).
+            if any(a not in ("view", "use") for a in wanted) and "view" not in wanted:
+                wanted.append("view")
             rows = CompanyUserScreenPermission.objects.using(alias).filter(
                 company_id=company.unique_id, project_id=project_id, userscreen_id=db_screen.pk,
                 permission_type="screen", is_deleted=False)

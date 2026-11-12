@@ -12,7 +12,9 @@ import {
 import { ModuleForms } from './iwmsForms'
 import { ModuleDetail } from './moduleDetail'
 import { ProjectPage } from './permissionsTab'
-import { CompanyDetail, CompanyWizard, DataBrowser, OpenWorkspace, FieldsEditor, slugPreview } from './companySetup'
+import { PrintTemplates } from './printTemplates'
+import { ExcelColumns } from './excelColumns'
+import { CompanyDetail, CompanyWizard, OpenWorkspace, FieldsEditor, slugPreview } from './companySetup'
 
 const S = 'super' as const
 
@@ -67,9 +69,10 @@ function Shell() {
         { items: [{ to: '/superadmin', label: 'Dashboard', icon: 'dashboard', end: true }] },
         { title: 'Manage', items: [
           { to: '/superadmin/companies', label: 'Companies', icon: 'building' },
-          { to: '/superadmin/data', label: 'Data', icon: 'database' },
           { to: '/superadmin/plans', label: 'Plans', icon: 'layers' },
           { to: '/superadmin/modules', label: 'Modules', icon: 'box' },
+          { to: '/superadmin/print-templates', label: 'Print templates', icon: 'printer' },
+          { to: '/superadmin/excel-columns', label: 'Excel columns', icon: 'sheet' },
         ] },
         { title: 'Billing', items: [
           { to: '/superadmin/plan-requests', label: 'Plan requests', icon: 'arrowUp', badge: pendingPlans },
@@ -85,11 +88,12 @@ function Shell() {
         <Route path="companies" element={<Companies />} />
         <Route path="companies/new" element={<CompanyWizard />} />
         <Route path="companies/:id" element={<CompanyDetail />} />
-        <Route path="data" element={<DataBrowser />} />
         <Route path="plans" element={<Plans />} />
         <Route path="modules" element={<Modules />} />
         <Route path="modules/:id" element={<ModuleDetail />} />
         <Route path="companies/:id/projects/:projectId" element={<ProjectPage />} />
+        <Route path="print-templates" element={<PrintTemplates />} />
+        <Route path="excel-columns" element={<ExcelColumns />} />
         <Route path="extra-records" element={<ExtraRecords />} />
         <Route path="plan-requests" element={<PlanRequests />} />
         <Route path="profile" element={

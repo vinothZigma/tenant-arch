@@ -29,6 +29,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { CompanyProjectFields } from "@/components/common/CompanyProjectFields";
 import { useCompanyProjectSelection } from "@/hooks/useCompanyProjectSelection";
+import { useFieldVisibility } from "@/hooks/useFieldVisibility";
 
 const STEPS = [
   { label: "Citizen", icon: UserRound },
@@ -56,6 +57,8 @@ const reviewCard = (title: string, icon: React.ReactNode, body: React.ReactNode)
 );
 
 export default function TicketWizardForm() {
+  // Console → Permissions & fields decides which fields this form shows.
+  const { showField: showZoneField } = useFieldVisibility("complaint-ticket", "tickets", { zone_id: ["zone_id"] });
   const navigate = useNavigate();
   const { encComplaintTicket, encComplaint } = getEncryptedRoute();
   const { listPath } = createCrudRoutePaths(encComplaintTicket, encComplaint);
@@ -129,9 +132,10 @@ export default function TicketWizardForm() {
       setSubcategories(asArray(subcategoryRows));
       setPriorities(asArray(priorityRows));
       setSources(asArray(sourceRows));
+      // Priority stays empty until a category is picked; it then pre-fills
+      // from the category/subcategory default (see defaultPriorityFor).
       setForm((prev) => ({
         ...prev,
-        priority: asArray<any>(priorityRows)[0]?.unique_id ?? "",
         status: asArray<any>(statusRows).find((item) => item.status_code === "SUBMITTED")?.unique_id ?? asArray<any>(statusRows)[0]?.unique_id ?? "",
         source: asArray<any>(sourceRows).find((item) => item.source_code === "ADMIN")?.unique_id ?? asArray<any>(sourceRows)[0]?.unique_id ?? "",
       }));
@@ -243,6 +247,20 @@ export default function TicketWizardForm() {
         ? prev.waste_types.filter((item) => item !== id)
         : [...prev.waste_types, id],
     }));
+  // Same order the backend uses when no priority is sent
+  // (ticket_serializers._apply_derived_defaults): subcategory default,
+  // then category default, then P3.
+  const defaultPriorityFor = (categoryId: string, subcategoryId: string): string => {
+    const idOf = (row: any) => entityId(row?.default_priority_id ?? row?.default_priority);
+    const subcategory = subcategories.find((item) => String(item.unique_id) === subcategoryId);
+    const category = categories.find((item) => String(item.unique_id) === categoryId);
+    const fallback = priorities.find((item) => item.priority_code === "P3");
+    return idOf(subcategory) || idOf(category) || String(fallback?.unique_id ?? "");
+  };
+  const onCategoryChange = (value: string) =>
+    setForm((prev) => ({ ...prev, category: value, subcategory: "", priority: value ? defaultPriorityFor(value, "") : "" }));
+  const onSubcategoryChange = (value: string) =>
+    setForm((prev) => ({ ...prev, subcategory: value, priority: defaultPriorityFor(prev.category, value) }));
   const filteredSubcategories = form.category ? subcategories.filter((item) => String(item.category_id) === form.category) : subcategories;
   const filteredDistricts = form.state ? districts.filter((item) => item.state_id === form.state) : districts;
   const filteredPanchayats = form.district ? panchayats.filter((item) => !item.district_id || item.district_id === form.district) : panchayats;
@@ -343,6 +361,7 @@ export default function TicketWizardForm() {
     }
     if (index === 1) {
       if (!form.category) return "Select a category to continue.";
+      if (!form.priority) return "Select a priority to continue.";
       if (!form.title.trim()) return "Enter a title to continue.";
       return null;
     }
@@ -471,7 +490,7 @@ export default function TicketWizardForm() {
               .join(", "),
           )}
           {reviewRow("Subcategory", capitalize(findLabel(subcategories, form.subcategory, "subcategory_name")))}
-          {reviewRow("Priority", `${capitalize(findLabel(priorities, form.priority, "priority_name"))} (from category)`)}
+          {reviewRow("Priority", capitalize(findLabel(priorities, form.priority, "priority_name")))}
           {reviewRow("Title", form.title)}
           {reviewRow("Description", form.description)}
           {reviewRow("Incident type", capitalize(form.incident_type))}
@@ -490,7 +509,7 @@ export default function TicketWizardForm() {
           {reviewRow("State", capitalize(findLabel(states, form.state, "name")))}
           {reviewRow("District", capitalize(findLabel(districts, form.district, "name")))}
           {reviewRow("Panchayat", capitalize(findLabel(panchayats, form.panchayat, "name")))}
-          {reviewRow("Zone", capitalize(findLabel(zones, form.zone, "name")))}
+          {showZoneField("zone_id") && reviewRow("Zone", capitalize(findLabel(zones, form.zone, "name")))}
           {reviewRow("Ward", capitalize(findLabel(wards, form.ward, "name")))}
           {reviewRow("Location", form.location_text)}
           {reviewRow("Latitude", form.latitude)}
@@ -589,7 +608,7 @@ export default function TicketWizardForm() {
               <Label>Category</Label>
               <FormSelect
                 value={form.category}
-                onChange={(v) => setForm((prev) => ({ ...prev, category: v, subcategory: "" }))}
+                onChange={onCategoryChange}
                 options={categories.map((item) => ({ value: String(item.unique_id), label: capitalize(item.category_name) }))}
                 required
                 placeholder={"Select category"}
@@ -599,9 +618,22 @@ export default function TicketWizardForm() {
               <Label>Subcategory</Label>
               <FormSelect
                 value={form.subcategory}
-                onChange={(v) => setValue("subcategory", v)}
+                onChange={onSubcategoryChange}
                 options={filteredSubcategories.map((item) => ({ value: String(item.unique_id), label: capitalize(item.subcategory_name) }))}
                 placeholder={"None"}
+              />
+            </div>
+            <div>
+              <Label>Priority</Label>
+              <FormSelect
+                value={form.priority}
+                onChange={(v) => setValue("priority", v)}
+                options={priorities.map((item) => ({
+                  value: String(item.unique_id),
+                  label: [item.priority_code, capitalize(item.priority_name)].filter(Boolean).join(" - "),
+                }))}
+                required
+                placeholder={"Select priority"}
               />
             </div>
             <div className="md:col-span-3">
@@ -695,7 +727,7 @@ export default function TicketWizardForm() {
                 placeholder={form.district ? "Select panchayat" : "Select a district first"}
               />
             </div>
-            <div>
+            {showZoneField("zone_id") && <div>
               <Label>Zone</Label>
               <FormSelect
                 value={form.zone}
@@ -704,7 +736,7 @@ export default function TicketWizardForm() {
                 disabled={!form.district}
                 placeholder={form.district ? "Select zone" : "Select a district first"}
               />
-            </div>
+            </div>}
             <div>
               <Label>Ward</Label>
               <FormSelect

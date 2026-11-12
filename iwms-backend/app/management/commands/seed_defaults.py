@@ -168,3 +168,7 @@ class Command(BaseCommand):
                     plan=plan, module=module, defaults={"record_limit": records, "extra_record_price": extra_price})
                 added += new
             self.stdout.write(f'Plan {name}: {"created" if created else "exists"} ({added} limits added)')
+
+        from app.tenancy.print_templates import ensure_sample_templates
+
+        self.stdout.write(f"Print templates: {ensure_sample_templates()} sample(s) added")

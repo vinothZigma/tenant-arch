@@ -74,10 +74,16 @@ def sync_userscreen_schema(userscreen):
         userscreen.model_name = model_class.__name__
         userscreen.save(update_fields=["model_app_label", "model_name", "updated_at"])
 
+    # Field rows are linked by the screen's name; a name longer than the
+    # column (30) — e.g. "daily-trip-household-collections" — can't be stored,
+    # so those screens use their unique_id (readers accept either).
+    limit = UserScreenColumn._meta.get_field("userscreen_id").max_length
+    screen_key = str(userscreen) if len(str(userscreen)) <= limit else userscreen.unique_id
+
     existing_columns = {
         obj.field_name: obj
         for obj in UserScreenColumn.objects.select_for_update().filter(
-            userscreen_id=userscreen,
+            userscreen_id=screen_key,
             is_deleted=False,
         )
     }
@@ -107,7 +113,7 @@ def sync_userscreen_schema(userscreen):
 
         created.append(
             UserScreenColumn.objects.create(
-                userscreen_id=userscreen,
+                userscreen_id=screen_key,
                 field_name=field.name,
                 **metadata,
             )
@@ -173,7 +179,8 @@ def detect_schema_changes(userscreen):
     django_fields = {field.name: field for field in iter_model_columns(model_class)}
     screen_columns = {
         column.field_name: column
-        for column in UserScreenColumn.objects.filter(userscreen_id=userscreen, is_deleted=False)
+        for column in UserScreenColumn.objects.filter(
+            userscreen_id__in=[str(userscreen), userscreen.unique_id], is_deleted=False)
     }
 
     changes["added_fields"] = sorted(set(django_fields) - set(screen_columns))

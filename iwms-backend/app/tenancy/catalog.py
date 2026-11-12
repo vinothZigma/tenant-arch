@@ -27,6 +27,11 @@ MASTER_MODELS = frozenset({
     "extrarecordpurchase",
     "planchangerequest",
     "formconfig",
+    # Print templates (super admin designs, assigned per company/project).
+    "printtemplate",
+    "printtemplateassignment",
+    # Excel import/export columns per company/project.
+    "excelcolumnsetting",
 })
 
 TENANT_APP_LABEL = "app"

@@ -27,6 +27,10 @@ def access_words(row):
 
 def refresh_staff_access(alias):
     _refresh_rows(alias)
+    # Company admins' staff rows follow the projects they run.
+    from .projects import fill_admin_projects
+
+    fill_admin_projects(alias)
     # Logins' IWMS role and project scope follow the same changes.
     from app.models.superadmin_masters.company import Company
 

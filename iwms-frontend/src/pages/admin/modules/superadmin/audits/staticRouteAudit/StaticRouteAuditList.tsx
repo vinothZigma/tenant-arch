@@ -17,6 +17,7 @@ import { StackCell } from "@/components/common/TableCells";
 import { FormSelect } from "@/components/common/FormSelect";
 import { FilterSection } from "@/components/common/ListToolbar";
 import { useDraftFilter } from "@/components/filters/useDraftFilter";
+import { useCompanyProjectFilter } from "@/components/filters/useCompanyProjectFilter";
 import { combineFilters } from "@/components/filters/useOptionFilter";
 import StaticRouteAuditDetail from "./StaticRouteAuditDetail";
 
@@ -74,14 +75,6 @@ export default function StaticRouteAuditList() {
 
   const loading = isLoading && records.length === 0;
 
-  const companyOptions = useMemo(
-    () => (filterOptions?.companies ?? []).map((c) => ({ label: c.name, value: c.unique_id })),
-    [filterOptions],
-  );
-  const projectOptions = useMemo(
-    () => (filterOptions?.projects ?? []).map((p) => ({ label: p.name, value: p.unique_id })),
-    [filterOptions],
-  );
   const planOptions = useMemo(
     () => (filterOptions?.trip_plans ?? []).map((p) => ({ label: p.name, value: p.unique_id })),
     [filterOptions],
@@ -95,13 +88,17 @@ export default function StaticRouteAuditList() {
     [filterOptions],
   );
 
-  // Company → Project → Trip plan, Deviation type and Trigger, edited in the
-  // Filters panel as a draft and sent once applied.
+  // Company → Project, the same filter as every other list: it opens on the
+  // signed-in company (and its only project).
+  const companyProject = useCompanyProjectFilter(() => setFirst(0));
+  const { companyId: companyFilter, projectId: projectFilter } = companyProject;
+  const draftCompany = companyProject.selection.companyUniqueId;
+
+  // Trip plan, Deviation type and Trigger, edited in the Filters panel as a
+  // draft and sent once applied.
   const scope = useDraftFilter({
-    empty: { company: "", project: "", plan: "", changeType: "", trigger: "" },
+    empty: { plan: "", changeType: "", trigger: "" },
     chips: {
-      company: { label: "Company", format: (v) => nameOf(companyOptions, v), clears: ["project", "plan"] },
-      project: { label: "Project", format: (v) => nameOf(projectOptions, v), clears: ["plan"] },
       plan: { label: "Trip plan", format: (v) => nameOf(planOptions, v) },
       changeType: { label: "Deviation type", format: (v) => nameOf(changeTypeOptions, v) },
       trigger: { label: "Trigger", format: (v) => nameOf(triggerOptions, v) },
@@ -109,8 +106,6 @@ export default function StaticRouteAuditList() {
     onAppliedChange: () => setFirst(0),
   });
   const {
-    company: companyFilter,
-    project: projectFilter,
     plan: planFilter,
     changeType: changeTypeFilter,
     trigger: triggerFilter,
@@ -164,7 +159,7 @@ export default function StaticRouteAuditList() {
     const loadFilterOptions = async () => {
       try {
         const data = (await staticRouteAuditApi.read("filter-options", {
-          params: draft.company ? { company_id: draft.company } : {},
+          params: draftCompany ? { company_id: draftCompany } : {},
         })) as unknown as StaticRouteAuditFilterOptions;
         if (mounted && data) setFilterOptions(data);
       } catch {
@@ -175,7 +170,7 @@ export default function StaticRouteAuditList() {
     return () => {
       mounted = false;
     };
-  }, [draft.company]);
+  }, [draftCompany]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -273,24 +268,6 @@ export default function StaticRouteAuditList() {
 
   const scopeField = (
     <>
-      <FilterSection label="Company & project">
-        <div className="grid grid-cols-2 gap-2">
-          <FormSelect
-            label="Company"
-            value={draft.company}
-            onChange={(value) => scope.setDraft((d) => ({ ...d, company: value, project: "", plan: "" }))}
-            options={companyOptions}
-            placeholder={t("common.all")}
-          />
-          <FormSelect
-            label="Project"
-            value={draft.project}
-            onChange={(value) => scope.setDraft((d) => ({ ...d, project: value, plan: "" }))}
-            options={projectOptions}
-            placeholder={t("common.all")}
-          />
-        </div>
-      </FilterSection>
       <FilterSection label="Trip plan">
         <FormSelect
           value={draft.plan}
@@ -356,7 +333,7 @@ export default function StaticRouteAuditList() {
               searchPlaceholder="Search plan code, plan id, user…"
             />
           }
-          filterPanel={combineFilters({ ...scope, field: scopeField })}
+          filterPanel={combineFilters(companyProject, { ...scope, field: scopeField })}
           onServerExport={serverExport}
           value={records}
           dataKey="id"

@@ -618,25 +618,35 @@ const resolveColumnEntries = (
   moduleName: string,
   screenName: string,
 ): ColumnPermissionEntry[] => {
-  const moduleEntry = resolveModuleEntry(
-    columnPermissions.grouped as unknown as Record<string, Record<string, string[]>>,
+  const grouped = columnPermissions.grouped as unknown as Record<string, Record<string, ColumnPermissionEntry[]>>;
+  const moduleCandidates = [
     moduleName,
-  ) as unknown as Record<string, ColumnPermissionEntry[]> | undefined;
-
-  if (!moduleEntry) return [];
-  if (Array.isArray(moduleEntry[screenName])) return moduleEntry[screenName];
-
-  const aliasCandidates = [
+    ...(MODULE_ALIASES[moduleName] ?? []),
+    ...(MODULE_ALIASES[normalizeKey(moduleName)] ?? []),
+  ];
+  const screenCandidates = [
     screenName,
     ...(SCREEN_ALIASES[screenName] ?? []),
     ...(SCREEN_ALIASES[normalizeKey(screenName)] ?? []),
   ];
-
-  const screenKey = Object.keys(moduleEntry).find((key) =>
-    aliasCandidates.some((candidate) => keysMatch(key, candidate)),
-  );
-
-  return screenKey ? moduleEntry[screenKey] ?? [] : [];
+  // A module and its aliases (e.g. "assets" -> "masters", "waste-types"):
+  // use the first of them that actually has this screen, not just the first
+  // alias present (bins live under "waste-types", not "masters").
+  const moduleKeys = [
+    ...(grouped[moduleName] ? [moduleName] : []),
+    ...Object.keys(grouped).filter((key) => key !== moduleName
+      && moduleCandidates.some((candidate) => keysMatch(key, candidate))),
+  ];
+  for (const key of moduleKeys) {
+    const moduleEntry = grouped[key];
+    if (!moduleEntry) continue;
+    if (Array.isArray(moduleEntry[screenName])) return moduleEntry[screenName];
+    const screenKey = Object.keys(moduleEntry).find((k) =>
+      screenCandidates.some((candidate) => keysMatch(k, candidate)),
+    );
+    if (screenKey && Array.isArray(moduleEntry[screenKey])) return moduleEntry[screenKey];
+  }
+  return [];
 };
 
 const columnEntryMatches = (entry: ColumnPermissionEntry, fieldName: string): boolean => {
@@ -697,7 +707,10 @@ export const hasColumnPermission = (
   if (entries.length === 0) return true;
 
   const matched = entries.find((entry) => columnEntryMatches(entry, fieldName));
-  return matched ? matched.canView !== false : false;
+  // A form field that isn't a column of the screen's table (e.g. Continent /
+  // Country on Ward and Zone, derived from the state) has no setting to hide
+  // it: show it. Only columns ticked off in Permissions & fields are hidden.
+  return matched ? matched.canView !== false : true;
 };
 
 export const filterVisibleColumns = <TColumn>(

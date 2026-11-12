@@ -155,9 +155,9 @@ class TenantView(APIView):
         return {"usage": None, "limits_reached": full}
 
 
-def company_json(company):
+def company_json(company, request=None):
     return {"name": company.name, "slug": company.slug, "contact_email": company.contact_email,
-            "logo_url": logo_url(company), "theme_color": company.theme_color}
+            "logo_url": logo_url(company, request), "theme_color": company.theme_color}
 
 
 # --- public / auth ----------------------------------------------------------
@@ -168,7 +168,7 @@ class CompanyInfoView(TenantView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        return Response({**company_json(request.company), "is_active": request.company.is_active})
+        return Response({**company_json(request.company, request), "is_active": request.company.is_active})
 
 
 class LoginView(TenantView):
@@ -241,7 +241,7 @@ class MeView(TenantView):
             for code, cm in enabled.items() if code in visible
         ]
         return Response({
-            "company": company_json(request.company),
+            "company": company_json(request.company, request),
             "user": login_json(request.user),
             "viewed_by_super_admin": (request.auth or {}).get("imp"),
             "projects": projects,
@@ -704,7 +704,7 @@ class CompanyLogoView(TenantView):
 
     def post(self, request):
         set_logo(request.company, request.FILES.get("logo"))
-        return Response({"logo_url": logo_url(request.company)})
+        return Response({"logo_url": logo_url(request.company, request)})
 
     def delete(self, request):
         remove_logo(request.company)
@@ -721,3 +721,69 @@ class CompanyBrandingView(TenantView):
             raise ValidationError({"theme_color": e.detail})
         request.company.save(update_fields=["theme_color", "updated_at"])
         return Response({"theme_color": request.company.theme_color})
+
+
+class PrintTemplateView(APIView):
+    """GET ws/print-template/<report>/?project_id=<id>
+
+    The layout this company (or project) prints the report with, chosen by
+    the super admin (app/tenancy/print_templates.py), plus the company/project
+    names and logo for the header. Any signed-in IWMS user may read it: a
+    layout holds no data. Without a company (platform login) -> the default.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_code):
+        from .print_templates import REPORTS, report_json, resolve_template, template_json
+
+        if report_code not in REPORTS:
+            raise NotFound("Unknown report.")
+        company = getattr(request, "company", None)
+        project_id = str(request.query_params.get("project_id") or "")
+        template, source = resolve_template(company, project_id, report_code)
+        project_name = ""
+        if company is not None and company.db_name and project_id:
+            project = (Project.objects.using(register_tenant_db(company.db_name))
+                       .filter(pk=project_id, is_deleted=False).only("name").first())
+            project_name = project.name if project else ""
+        return Response({
+            "report": report_json(report_code),
+            "template": template_json(template) if template else None,
+            "source": source,
+            "company": {
+                "name": company.name if company else "",
+                "logo_url": logo_url(company, request) if company else None,
+                "theme_color": company.theme_color if company else None,
+            },
+            "project": {"id": project_id, "name": project_name},
+        })
+
+
+class ExcelColumnsView(APIView):
+    """GET ws/excel-columns/?path=<list API path>&project_id=<id>
+
+    The Excel columns the super admin enabled for this company / project on
+    the screen behind `path` (app/tenancy/excel_columns.py):
+    {screen, export: [{field, header}] | null, import: [...] | null}, null =
+    every field. Fields hidden in Permissions & fields or removed from the
+    project's database are left out. The list pages build the upload
+    template and the page export from it; the server enforces it as well.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .excel_columns import EXPORT, IMPORT, effective_columns, request_project, resolve, screen_for_path
+
+        raw = str(request.query_params.get("path") or "").split("?")[0]
+        path = "/api/v1/" + raw.strip("/") + "/"
+        screen = screen_for_path(path)
+        company = getattr(request, "company", None)
+        project_id = request_project(request, request.query_params.get("project_id"))
+        out = {"screen": screen}
+        for kind in (EXPORT, IMPORT):
+            # the setting minus fields this project may not have (null = every field)
+            out[kind] = effective_columns(request, screen, project_id, kind) if screen else None
+            out[f"{kind}_source"] = resolve(company, project_id, screen, kind)[1]
+        return Response(out)

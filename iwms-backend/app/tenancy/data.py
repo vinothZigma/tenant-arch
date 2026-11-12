@@ -24,13 +24,13 @@ HIDDEN_COLUMNS = {"password", "previous_password", "fcm_token", "delete_reason"}
 BROWSE_LIMIT = 500
 
 
-def data_tree():
+def data_tree(request=None):
     """Every company -> projects -> modules, with record counts. A broken
     company DB is reported on that company and doesn't hide the others."""
     names = {m.code: m for m in Module.objects.all()}
     out = []
     for c in Company.objects.filter(is_deleted=False).exclude(db_name=None).select_related("plan").order_by("name"):
-        item = {"id": c.pk, "name": c.name, "slug": c.slug, "logo_url": logo_url(c), "theme_color": c.theme_color,
+        item = {"id": c.pk, "name": c.name, "slug": c.slug, "logo_url": logo_url(c, request), "theme_color": c.theme_color,
                 "is_active": c.is_active, "plan_name": c.plan.name if c.plan else None, "projects": [],
                 "error": None}
         try:
