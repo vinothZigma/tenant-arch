@@ -183,6 +183,8 @@ export type EmployeeOption = {
   username?: string | null;
   password?: string | null;
   active_status?: boolean;
+  /** The staff member's login switch (from their staff record). */
+  login_enabled?: boolean;
   has_access_configuration?: boolean;
 };
 

@@ -1,4 +1,5 @@
 import type { ChangePasswordModalProps, ErrorWithResponse, Section } from "./types";
+import { Switch } from "@/components/ui/switch";
 import { createCrudRoutePaths } from "@/utils/routePaths";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
@@ -1773,6 +1774,24 @@ export default function StaffCreationForm() {
             options={salaryTypeOptions}
             placeholder={t("admin.staff_creation.salary_type_placeholder")}
           />
+        </div>
+      )}
+      {/* ── Login on/off: off = this staff member can't sign in ── */}
+      {showField("login_enabled") && (
+        <div>
+          <Label htmlFor="login_enabled">
+            {t("admin.staff_creation.login_enabled", "Login Enabled")}
+          </Label>
+          <div className="mt-2 flex items-center gap-3">
+            <Switch
+              id="login_enabled"
+              checked={formData.login_enabled === "1"}
+              onCheckedChange={(on) => handleSelectChange("login_enabled", on ? "1" : "0")}
+            />
+            <span className="text-sm text-gray-600 dark:text-gray-300">
+              {formData.login_enabled === "1" ? "Can sign in" : "Can't sign in"}
+            </span>
+          </div>
         </div>
       )}
       {showField("active_status") && (

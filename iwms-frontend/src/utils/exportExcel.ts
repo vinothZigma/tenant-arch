@@ -1,6 +1,7 @@
 import { saveAs } from "file-saver";
 import { recordExcelAudit } from "@/helpers/admin/commonAudit";
 import { decryptSegment } from "@/utils/routeCrypto";
+import { appPathname } from "@/utils/urlScope";
 
 // xlsx is ~427KB minified — loaded on demand only when a user actually
 // triggers an Excel export/import, instead of shipping in every list
@@ -35,7 +36,7 @@ const toFilenamePart = (value: string) =>
 export const getAdminScreenExcelFilename = (type: ExcelDownloadType) => {
   if (typeof window === "undefined") return `table_data_${type}.xlsx`;
 
-  const segments = window.location.pathname
+  const segments = appPathname()
     .split("/")
     .filter(Boolean)
     .map((segment) => decryptSegment(segment) ?? segment);

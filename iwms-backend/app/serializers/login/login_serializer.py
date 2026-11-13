@@ -36,6 +36,8 @@ def _is_password_expired(password_crt_date):
     return age.days >= PASSWORD_EXPIRY_DAYS
 
 
+from app.tenancy.project_slugs import company_project_slugs
+
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField(required=True)
     password = serializers.CharField(required=True, write_only=True)
@@ -520,6 +522,14 @@ class LoginSerializer(serializers.Serializer):
             .filter(lookup_filters)
         )
 
+        # /<company>/<project>/login sends the project (slug). The name or
+        # employee ID typed in may match several staff (same name, same
+        # password, different projects): pick the one on that project.
+        # LoginViewSet refuses the login when none of them is on it.
+        wanted_slug = str(getattr(self, "initial_data", {}).get("project") or "").strip().lower()
+        first_payload = None
+        login_disabled = False
+
         for candidate in queryset:
             if not self._password_matches(password, candidate.password):
                 Staffcreation.objects.filter(pk=candidate.pk).update(
@@ -535,10 +545,21 @@ class LoginSerializer(serializers.Serializer):
                 Staffcreation.objects.filter(pk=candidate.pk).update(
                     failed_login_attempts=F("failed_login_attempts") + 1
                 )
-                raise serializers.ValidationError("Login is disabled for this user")
+                login_disabled = True
+                continue
 
-            return self._build_staff_payload(candidate)
+            payload = self._build_staff_payload(candidate)
+            if not wanted_slug:
+                return payload
+            slugs = company_project_slugs(candidate.company_id)
+            if any(slugs.get(p.get("unique_id")) == wanted_slug for p in payload.get("projects") or []):
+                return payload
+            first_payload = first_payload or payload
 
+        if first_payload is not None:
+            return first_payload
+        if login_disabled:
+            raise serializers.ValidationError("Login is disabled for this user")
         return None
 
     def _authenticate_district_member(self, username, password):

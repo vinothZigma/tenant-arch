@@ -35,6 +35,7 @@ import AnimatedLoginScene from "@/components/auth/AnimatedLoginScene";
 import LoginFeatureChain from "@/components/auth/LoginFeatureChain";
 import "@/components/auth/animated-login.css";
 import { api as tenancyApi, setToken as markTenancySignedIn } from "@/tenancy/api";
+import { getUrlScope, goOutsideScope } from "@/utils/urlScope";
 
 // One DB per company: a platform super admin has no company to open the IWMS
 // screens in. The login API says so with code "use_super_console"; they are
@@ -131,6 +132,9 @@ export default function Auth() {
         username,
         password,
         client: "web",
+        // /<company>/<project>/login: the backend refuses staff who are not
+        // on this project.
+        ...(getUrlScope() ? { project: getUrlScope()?.project } : {}),
       });
 
       const payload = unwrapLoginPayload(res.data);
@@ -182,7 +186,7 @@ export default function Auth() {
           // Same credentials, console login (sets its own HttpOnly cookie).
           await tenancyApi("super", "POST", "/login/", { username, password });
           markTenancySignedIn("super");
-          navigate("/superadmin", { replace: true });
+          goOutsideScope("/superadmin", navigate);
           return;
         } catch {
           // fall through to the normal error message
@@ -315,7 +319,7 @@ export default function Auth() {
               type="button"
               className="forgot"
               style={{ display: "block", margin: "12px auto 0" }}
-              onClick={() => navigate("/superadmin/login")}
+              onClick={() => goOutsideScope("/superadmin/login", navigate)}
             >
               Super admin? Open the console to create companies and projects
             </button>

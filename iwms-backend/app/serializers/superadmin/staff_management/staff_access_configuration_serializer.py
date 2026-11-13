@@ -355,6 +355,7 @@ class StaffAccessConfigurationSerializer(serializers.ModelSerializer):
             if staff:
                 # What StaffcreationSerializer(staff).data["password"] gives.
                 data["password"] = decrypt_password(staff.password or "")
+                data["login_enabled"] = bool(staff.login_enabled)
         return data
 
     def _nested_value(self, *keys, default=None):

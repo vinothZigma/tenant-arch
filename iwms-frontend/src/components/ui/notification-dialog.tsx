@@ -56,11 +56,27 @@ function ConfirmationBody({ request }: { request: ConfirmationRequest }) {
           </AlertDialogDescription>
         )}
       </AlertDialogHeader>
+      {request.amount && (
+        <div className="rounded-xl border border-primary/30 bg-primary/5 p-4">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-sm font-medium text-muted-foreground">{request.amount.label}</span>
+            <span className="text-2xl font-bold text-foreground">{request.amount.value}</span>
+          </div>
+          {request.amount.details?.map((line) => (
+            <div key={line} className="mt-1 text-right text-xs text-muted-foreground">
+              {line}
+            </div>
+          ))}
+          {request.amount.hint && (
+            <p className="mt-3 border-t border-primary/20 pt-2 text-xs text-muted-foreground">{request.amount.hint}</p>
+          )}
+        </div>
+      )}
       {input && (
         <div className="space-y-1">
           {input.label && (
             <label htmlFor="confirmation-input" className="text-sm font-medium">
-              {input.label} <span className="text-destructive">*</span>
+              {input.label} {input.validate && <span className="text-destructive">*</span>}
             </label>
           )}
           <Textarea

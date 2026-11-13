@@ -1,6 +1,8 @@
 // Company entry points (multi-tenancy). Companies use the existing IWMS
 // screens; these only pick the company (see utils/companyScope.ts):
 //
+//   /<slug>/<project>/login  the IWMS sign-in page for that company, opening
+//                      that project (prefix handled by utils/urlScope.ts)
 //   /<slug>/login      the IWMS sign-in page, signing in to that company
 //   /<slug>#as=<token> the super admin's "Open workspace": that company's
 //                      IWMS screens as one of its admins, in this tab only
@@ -10,6 +12,14 @@ import { Navigate, useParams } from "react-router-dom";
 
 import Auth from "@/pages/Auth";
 import { getCompanySlug, getTabToken, setCompanySlug, startTabCompanyView } from "@/utils/companyScope";
+import { getUrlScope } from "@/utils/urlScope";
+
+/** /<slug>/<project>/login: the router sees "/login" under the prefix. */
+export function ScopedLogin() {
+  const slug = getUrlScope()?.company ?? "";
+  if (slug && (getCompanySlug() !== slug || getTabToken())) setCompanySlug(slug);
+  return <Auth />;
+}
 
 export function CompanyLogin() {
   const { slug = "" } = useParams();

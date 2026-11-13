@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useSyncExternalStore } from "react";
 import { BrowserRouter } from "react-router-dom";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -12,12 +13,16 @@ import { UserProvider } from "@/contexts/UserContext";
 import { PermissionProvider } from "@/contexts/PermissionContext";
 import { RolesProvider } from "@/contexts/RolesContext";
 import { ProjectSelectorProvider } from "@/contexts/ProjectSelectorContext";
+import { routerBasename, subscribeUrlScope } from "@/utils/urlScope";
 
 type Props = {
   children: ReactNode;
 };
 
 export function AppProviders({ children }: Props) {
+  // "/<company>/<project>" in front of every IWMS route (utils/urlScope.ts).
+  // A new prefix remounts the router so it re-reads the URL.
+  const basename = useSyncExternalStore(subscribeUrlScope, routerBasename);
   return (
     <RolesProvider>
       <ThemeProvider>
@@ -26,7 +31,7 @@ export function AppProviders({ children }: Props) {
             <PermissionProvider>
               <ProjectSelectorProvider>
               <TooltipProvider>
-                <BrowserRouter>
+                <BrowserRouter key={basename || "/"} basename={basename || undefined}>
                   {children}
                   <NotificationDialog />
                   <GlobalRequestLoader />

@@ -39,6 +39,7 @@ from app.utils.filters import (
     SerializerOrderingFilter,
 )
 from app.utils.pagination import LimitOffsetWithPage
+from app.utils.staff_login import parse_switch, set_staff_login
 from app.utils.screen_dependencies import (
     mainscreen_label,
     screen_group,
@@ -206,6 +207,15 @@ class StaffAccessConfigurationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
         instance.delete()
         self._audit_access(instance, before, EMPTY_SNAPSHOT, "DELETED")
         cache.clear()
+
+    @action(detail=True, methods=["patch"], url_path="login")
+    def set_login(self, request, staff_unique_id=None):
+        """The list's Login switch: only turns the staff member's login on/off."""
+        config = self.get_object()
+        staff = Staffcreation.objects.filter(staff_unique_id=config.staff_id, is_deleted=False).first()
+        if staff is None:
+            return Response({"detail": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(set_staff_login(staff, parse_switch(request.data.get("login_enabled")), request))
 
     @action(detail=False, methods=["get"], url_path="employee-options")
     def employee_options(self, request):

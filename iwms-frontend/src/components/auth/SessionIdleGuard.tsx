@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { loginPath } from "@/utils/companyScope";
+import { appPathname } from "@/utils/urlScope";
 import { useNavigate } from "react-router-dom";
 import { useUser } from "@/contexts/UserContext";
 import { clearAuthSession } from "@/utils/authStorage";
@@ -23,7 +24,7 @@ export default function SessionIdleGuard() {
     (cause: SessionEndCause) => {
       clearAuthSession();
       setUser(null);
-      if (UNGUARDED_PREFIXES.some((p) => window.location.pathname.startsWith(p))) return;
+      if (UNGUARDED_PREFIXES.some((p) => appPathname().startsWith(p))) return;
       navigate(loginPath(), {
         replace: true,
         state: { sessionMessage: SESSION_END_MESSAGES[cause] },

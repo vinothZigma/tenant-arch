@@ -26,6 +26,8 @@ import { useFilterBarFilters } from "@/hooks/useFilterBarFilters";
 
 import type { StaffAccessConfigRecord } from "./types";
 import { Can } from "@/contexts/ScreenPermissionContext";
+import { useScreenAccess } from "@/contexts/screenPermission";
+import { LoginSwitch } from "@/components/common/LoginSwitch";
 
 type ListRow = StaffAccessConfigRecord;
 
@@ -65,6 +67,7 @@ const extractErrorMessage = (error: unknown, fallback: string): string => {
 export default function StaffAccessConfigList() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { canEdit } = useScreenAccess();
 
   const [rows, setRows] = useState<StaffAccessConfigRecord[]>([]);
   const [totalRecords, setTotalRecords] = useState(0);
@@ -238,6 +241,16 @@ export default function StaffAccessConfigList() {
     );
   };
 
+  const loginTemplate = (row: ListRow) => (
+    <LoginSwitch
+      screen="staffAccessConfiguration"
+      staffId={String(row.staff_unique_id ?? row.staff_id ?? "")}
+      projectId={projectId || row.project_ids?.[0] || null}
+      checked={row.login_enabled !== false}
+      disabled={!canEdit}
+    />
+  );
+
   const indexTemplate = (_: unknown, { rowIndex }: { rowIndex: number }) => rowIndex + 1;
 
   const onPage = (event: DataTablePageEvent) => {
@@ -350,6 +363,7 @@ export default function StaffAccessConfigList() {
           style={{ width: "10%" }}
         />
         <Column header="Status" body={statusTemplate} style={{ width: "10%" }} />
+        <Column header="Login" body={loginTemplate} style={{ width: "8%" }} />
         <Column header={t("common.actions")} body={actionTemplate} style={{ width: "8%", textAlign: "center" }} />
       </DataTable>
     </ComponentCard>

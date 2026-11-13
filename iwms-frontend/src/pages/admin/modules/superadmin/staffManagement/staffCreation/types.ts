@@ -37,6 +37,7 @@ export type Staff = {
   doj?: string;
   site_name?: string;
   active_status: boolean;
+  login_enabled?: boolean;
   salary_type?: string;
   contact_mobile?: number;
   department?: string;

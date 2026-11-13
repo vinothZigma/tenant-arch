@@ -18,6 +18,7 @@ from app.models.superadmin.staff_management.staffcreation import Staffcreation
 from app.models.masters.customer_masters.customercreation import CustomerCreation
 from app.models.masters.customer_masters.customer_access_configuration import CustomerAccessConfiguration
 from app.serializers.login.login_serializer import LoginSerializer
+from app.tenancy.project_slugs import company_project_slugs
 from app.authentication.cookies import (
     clear_auth_cookie,
     request_portal,
@@ -409,6 +410,39 @@ class LoginViewSet(ViewSet):
         company_name = info["company_name"]
         projects = info["projects"]
 
+        # Multi-tenancy: /<company>/<project>/login sends that project. Staff
+        # may only sign in there when the project is one of theirs (a staff
+        # member with two projects can sign in at either login page).
+        tenant_company = getattr(request, "company", None)
+        if tenant_company is not None and company_unique_id:
+            slugs = company_project_slugs(company_unique_id)
+            for p in projects:
+                if p.get("unique_id") in slugs:
+                    p["slug"] = slugs[p["unique_id"]]
+            wanted = str(request.data.get("project") or "").strip().lower()
+            if wanted and user_type != "platform":
+                wanted_id = next((pid for pid, slug in slugs.items() if slug == wanted), None)
+                if wanted_id is None:
+                    refusal = "This project's login page does not exist."
+                elif not any(p.get("unique_id") == wanted_id for p in projects):
+                    refusal = "You don't have access to this project. Sign in at your own project's login page."
+                else:
+                    refusal = None
+                if refusal:
+                    if _can_audit_login():
+                        LoginAudit.objects.create(
+                            user_unique_id=user_unique_id,
+                            username=login_identifier,
+                            password=login_password,
+                            ip_address=ip_address or "",
+                            user_agent=getattr(request, "user_agent", ""),
+                            success=False,
+                            reason="No access to project",
+                            company_id=company_unique_id,
+                            project_id=wanted_id,
+                        )
+                    return Response({"detail": refusal}, status=status.HTTP_403_FORBIDDEN)
+
         access = AccessToken.for_user(user)
 
         access["unique_id"] = user_unique_id
@@ -423,7 +457,6 @@ class LoginViewSet(ViewSet):
         access["projects"] = projects
         # Multi-tenancy: which console/company this token is for. A company
         # token is refused on every other company's URL (TenantMiddleware).
-        tenant_company = getattr(request, "company", None)
         if user_type == "platform":
             access["scope"] = "super"
         elif tenant_company is not None:

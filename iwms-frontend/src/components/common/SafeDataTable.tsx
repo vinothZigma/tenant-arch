@@ -79,6 +79,7 @@ import {
   type ExcelColumnsInfo,
 } from "@/utils/excelColumns";
 import { decryptSegment } from "@/utils/routeCrypto";
+import { appPathname } from "@/utils/urlScope";
 import { useScreenAccess } from "@/contexts/screenPermission";
 import BulkUploadResultDialog from "@/components/common/BulkUploadResultDialog";
 import BulkRejectedPanel from "@/components/common/BulkRejectedPanel";
@@ -326,7 +327,7 @@ const describeRowError = (error: unknown): unknown => {
 /** Per-page localStorage key for the rejected-rows panel. */
 const defaultImportResultKey = (importSheetName?: string) => {
   if (typeof window === "undefined") return importSheetName ?? "bulk-upload";
-  const path = window.location.pathname
+  const path = appPathname()
     .split("/")
     .filter(Boolean)
     .map((segment) => decryptSegment(segment) ?? segment)

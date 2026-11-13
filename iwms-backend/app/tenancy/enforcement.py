@@ -199,13 +199,24 @@ class PlanLimitMiddleware:
 
 
 def _check_builtin_limit(sender, instance, **kwargs):
-    """pre_save: creating a counted row of a limited built-in module."""
+    """pre_save: creating a counted row of a limited built-in sub-module (or
+    module, for a module-level limit left on a built-in module)."""
     if not per_db_mode() or not instance._state.adding:
         return
     alias = get_current_tenant_db()
     if not alias:
         return
+    from .sub_modules import is_counted, screens_for_model
+
     label = f"{sender._meta.app_label}.{sender.__name__}".lower()
+    screens = [s for s in screens_for_model(label) if is_counted(s, instance)]
+    if screens:
+        company = current_company()
+        if company is not None and company.plan is not None:
+            from .billing import screen_room
+
+            for screen in screens:
+                screen_room(company, alias, screen, is_admin=True)
     module = next((m for m in builtin_modules() if m.model_label.lower() == label), None)
     if module is None:
         return

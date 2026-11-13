@@ -24,6 +24,7 @@ MASTER_MODELS = frozenset({
     "module",
     "companymodule",
     "planmodulelimit",
+    "planscreenlimit",
     "extrarecordpurchase",
     "planchangerequest",
     "formconfig",

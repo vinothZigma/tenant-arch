@@ -11,6 +11,8 @@ class Plan(models.Model):
     name = models.CharField(max_length=50)
     user_limit = models.PositiveIntegerField()      # users with login on (admins included)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # per month
+    # Price of one extra user slot (one more login switched on). 0 = not sold.
+    extra_user_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     description = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -83,8 +85,9 @@ class CompanyModule(models.Model):
 
 
 class PlanModuleLimit(models.Model):
-    """Records a plan includes for one module (all projects together) and the
-    price of each extra one. No row = unlimited."""
+    """Records a plan includes for one CUSTOM module (all projects together)
+    and the price of each extra one. No row = unlimited. Built-in IWMS modules
+    are limited per sub-module instead (PlanScreenLimit)."""
 
     plan = models.ForeignKey(Plan, on_delete=models.CASCADE, related_name="module_limits")
     module = models.ForeignKey(Module, on_delete=models.CASCADE, related_name="plan_limits")
@@ -99,14 +102,40 @@ class PlanModuleLimit(models.Model):
         ]
 
 
+class PlanScreenLimit(models.Model):
+    """Records a plan includes for one sub-module of a built-in IWMS module
+    (e.g. Transport Masters > Vehicle Creation), all projects together, and the
+    price of each extra one. No row = unlimited. Sub-modules: app/tenancy/sub_modules.py."""
+
+    plan = models.ForeignKey(Plan, on_delete=models.CASCADE, related_name="screen_limits")
+    module = models.ForeignKey(Module, on_delete=models.CASCADE, related_name="plan_screen_limits")
+    screen = models.CharField(max_length=64)          # catalog screen name, e.g. "vehicle-creation"
+    record_limit = models.PositiveIntegerField()
+    extra_record_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    class Meta:
+        db_table = "tenancy_plan_screen_limit"
+        ordering = ["module__name", "screen"]
+        constraints = [
+            models.UniqueConstraint(fields=["plan", "screen"], name="uniq_tenancy_plan_screen_limit"),
+        ]
+
+
 class ExtraRecordPurchase(models.Model):
-    """Extra record slots bought for a module. Only paid slots count."""
+    """Extra slots bought by a company. Only paid slots count.
+
+    module set: extra records for that module.
+    module empty: extra USER slots (more logins switched on than the plan allows).
+    screen set: extra records for that sub-module of the (built-in) module.
+    """
 
     PENDING, PAID, CANCELLED = "pending", "paid", "cancelled"
     STATUSES = [(PENDING, "Pending payment"), (PAID, "Paid"), (CANCELLED, "Cancelled")]
 
     company = models.ForeignKey("app.Company", on_delete=models.CASCADE, related_name="extra_purchases")
-    module = models.ForeignKey(Module, on_delete=models.CASCADE, related_name="extra_purchases")
+    module = models.ForeignKey(Module, on_delete=models.CASCADE, related_name="extra_purchases",
+                               null=True, blank=True)
+    screen = models.CharField(max_length=64, blank=True, default="")
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)    # snapshot at request time
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)

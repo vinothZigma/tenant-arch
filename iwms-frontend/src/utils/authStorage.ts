@@ -43,6 +43,8 @@ export const WARDS_STORAGE_KEY = "wards_config";
 export type ProjectConfig = {
   unique_id: string;
   name: string;
+  /** URL part, /<company>/<slug>/... (from the login response). */
+  slug?: string;
   gps_api_url?: string | null;
   gps_vehicle_history_api?: string | null;
   gps_vehicle_tracking_api?: string | null;

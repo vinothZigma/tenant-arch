@@ -9,6 +9,7 @@ import {
 import { getStoredProjects, getStoredProfile, isAuthSessionActive } from "@/utils/authStorage";
 import type { ProjectConfig } from "@/utils/authStorage";
 import { projectApi, companyApi } from "@/helpers/admin";
+import { projectIdFromUrl } from "@/utils/urlScope";
 
 const SESSION_KEY = "ps_project_id";
 
@@ -60,6 +61,9 @@ export function useProjectSelector(): ProjectSelectorContextValue {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function resolveInitialProjectId(projects: ProjectConfig[]): string {
+  // /<company>/<project>/... names the project (utils/urlScope.ts).
+  const fromUrl = projectIdFromUrl(projects);
+  if (fromUrl) return fromUrl;
   const saved = sessionStorage.getItem(SESSION_KEY) ?? "";
   if (saved && projects.some((p) => p.unique_id === saved)) return saved;
   return projects[0]?.unique_id ?? "";
@@ -69,6 +73,7 @@ function mapProjectRecord(p: any): ProjectConfig {
   return {
     unique_id: p.unique_id,
     name: p.name,
+    slug: p.slug ?? undefined,
     gps_api_url: p.gps_api_url ?? null,
     gps_vehicle_history_api: p.gps_vehicle_history_api ?? null,
     gps_vehicle_tracking_api: p.gps_vehicle_tracking_api ?? null,
@@ -187,7 +192,8 @@ export function ProjectSelectorProvider({ children }: { children: ReactNode }) {
         );
         if (cancelled) return;
         const refreshed = fresh.map((record, i) =>
-          record ? mapProjectRecord(record) : stored[i]
+          // The project API has no slug: keep the login response's one.
+          record ? { ...mapProjectRecord(record), slug: stored[i].slug } : stored[i]
         );
         setProjects(refreshed);
       } catch {

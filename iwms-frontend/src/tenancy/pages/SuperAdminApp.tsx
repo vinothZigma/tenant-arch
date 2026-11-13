@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
   api, getToken, logout, setToken,
-  money, type Company, type Field, type Module, type Plan,
-  type PlanModuleLimit, type PlanRequestStatus, type Purchase, type PurchaseStatus, type SuperPlanRequest, CURRENCY,
+  money, planLimitLines, usageBars, type Company, type Field, type Module, type Plan,
+  type PlanModuleLimit, type PlanScreenLimit, type PlanRequestStatus, type Purchase, type PurchaseStatus, type SuperPlanRequest, CURRENCY,
 } from '../api'
 import { LoginForm, Modal, UsageBar } from '../components'
 import {
@@ -129,8 +129,8 @@ function Dashboard() {
   const revenue = purchases.filter((p) => p.status === 'paid').reduce((s, p) => s + p.total_amount, 0)
   const records = companies.reduce((s, c) => s + Object.values(c.usage?.modules ?? {}).reduce((t, q) => t + q.used, 0), 0)
   const users = companies.reduce((s, c) => s + (c.usage?.users_used ?? 0), 0)
-  // Companies with any module at 80%+ of its limit.
-  const nearLimit = companies.flatMap((c) => Object.values(c.usage?.modules ?? {})
+  // Companies with any module / sub-module at 80%+ of its limit.
+  const nearLimit = companies.flatMap((c) => (c.usage ? usageBars(c.usage) : [])
     .filter((q) => q.limit !== null && q.limit > 0 && q.used / q.limit >= 0.8)
     .map((q) => ({ company: c, q })))
 
@@ -173,9 +173,9 @@ function Dashboard() {
           {nearLimit.length === 0 ? <p className="card-empty">No company is close to a limit.</p> : (
             <ul className="list">
               {nearLimit.slice(0, 6).map(({ company, q }) => (
-                <li key={`${company.id}-${q.module_id}`}>
+                <li key={`${company.id}-${q.key}`}>
                   <Avatar name={company.name} size={30} />
-                  <div className="list-main"><strong>{company.name}</strong><UsageBar label={q.module_name} used={q.used} limit={q.limit} /></div>
+                  <div className="list-main"><strong>{company.name}</strong><UsageBar label={q.label} used={q.used} limit={q.limit} /></div>
                 </li>
               ))}
             </ul>
@@ -245,8 +245,8 @@ function Companies() {
                   <td className="usage-cell">
                     {c.usage ? <>
                       <UsageBar label="Users" used={c.usage.users_used} limit={c.usage.user_limit} />
-                      {Object.entries(c.usage.modules).map(([code, q]) => (
-                        <UsageBar key={code} label={q.module_name + (q.extra ? ` (+${q.extra})` : '')} used={q.used} limit={q.limit} />
+                      {usageBars(c.usage).map((q) => (
+                        <UsageBar key={q.key} label={q.label + (q.extra ? ` (+${q.extra})` : '')} used={q.used} limit={q.limit} />
                       ))}
                     </> : <span className="error-text">DB unavailable</span>}
                   </td>
@@ -272,47 +272,76 @@ function Companies() {
 function Plans() {
   const [plans, setPlans] = useState<Plan[]>([])
   const [modules, setModules] = useState<Module[]>([])
-  const [adding, setAdding] = useState(false)
-  const load = useCallback(() => { api<Plan[]>(S, 'GET', '/plans/').then(setPlans) }, [])
-  useEffect(() => { load(); api<Module[]>(S, 'GET', '/modules/').then(setModules) }, [load])
+  // The plan shown (one at a time, picked from the tabs), or 'new'.
+  const [selected, setSelected] = useState<number | 'new' | null>(null)
+  const load = useCallback((show?: number) => api<Plan[]>(S, 'GET', '/plans/').then((list) => {
+    setPlans(list)
+    setSelected((cur) => {
+      if (show) return show
+      if (typeof cur === 'number' && list.some((p) => p.id === cur)) return cur
+      return list[0]?.id ?? 'new'
+    })
+  }), [])
+  useEffect(() => { void load(); api<Module[]>(S, 'GET', '/modules/').then(setModules) }, [load])
+  const plan = typeof selected === 'number' ? plans.find((p) => p.id === selected) ?? null : null
 
   return (
     <>
       <PageHeader
         title="Plans"
-        subtitle="Records included per module, price per extra record, and user limit."
-        actions={<button className="primary" onClick={() => setAdding(true)}><Icon name="plus" size={16} /> New plan</button>}
+        subtitle="Pick a plan to see and edit it: users, records included per sub-module, and the price of extras."
+        actions={<button className="primary" onClick={() => setSelected('new')}><Icon name="plus" size={16} /> New plan</button>}
       />
-      {adding && <PlanCard plan={null} modules={modules} onSaved={() => { setAdding(false); load() }} onCancel={() => setAdding(false)} />}
-      {plans.map((p) => <PlanCard key={p.id} plan={p} modules={modules} onSaved={load} />)}
+      <div className="tabs">
+        {plans.map((p) => (
+          <button key={p.id} className={selected === p.id ? 'active' : ''} onClick={() => setSelected(p.id)}>{p.name}</button>
+        ))}
+        {selected === 'new' && <button className="active">New plan</button>}
+      </div>
+      {selected === 'new' && (
+        <PlanCard key="new" plan={null} modules={modules}
+          onSaved={(id) => void load(id)} onCancel={() => setSelected(plans[0]?.id ?? null)} />
+      )}
+      {plan && <PlanCard key={plan.id} plan={plan} modules={modules} onSaved={(id) => void load(id)} />}
     </>
   )
 }
 
 function PlanCard({ plan, modules, onSaved, onCancel }: {
-  plan: Plan | null; modules: Module[]; onSaved: () => void; onCancel?: () => void
+  plan: Plan | null; modules: Module[]; onSaved: (id?: number) => void; onCancel?: () => void
 }) {
   const [name, setName] = useState(plan?.name ?? '')
   const [code, setCode] = useState(plan?.code ?? '')
   const [userLimit, setUserLimit] = useState(plan?.user_limit ?? 5)
+  const [extraUserPrice, setExtraUserPrice] = useState(plan?.extra_user_price ?? 0)
   const [price, setPrice] = useState(plan?.price ?? 0)
   const [description, setDescription] = useState(plan?.description ?? '')
-  // keyed by module id; missing = unlimited
+  // Custom modules: keyed by module id. Built-in modules: per sub-module,
+  // keyed by screen name. Missing = unlimited.
   const [limits, setLimits] = useState<Record<number, PlanModuleLimit>>(() =>
     Object.fromEntries((plan?.module_limits ?? []).map((l) => [l.module, l])))
+  const [screenLimits, setScreenLimits] = useState<Record<string, PlanScreenLimit>>(() =>
+    Object.fromEntries((plan?.screen_limits ?? []).map((l) => [l.screen, l])))
   const toast = useToast()
   const setLimit = (id: number, patch: Partial<PlanModuleLimit>) => setLimits((ls) => ({ ...ls, [id]: { ...ls[id], ...patch } }))
+  const setScreenLimit = (screen: string, patch: Partial<PlanScreenLimit>) =>
+    setScreenLimits((ls) => ({ ...ls, [screen]: { ...ls[screen], ...patch } }))
+
+  const builtin = modules.filter((m) => m.kind === 'builtin' && (m.plan_forms ?? []).length > 0)
+  const custom = modules.filter((m) => m.kind !== 'builtin')
 
   async function save() {
     const body = {
-      name, code, user_limit: userLimit, price, description,
+      name, code, user_limit: userLimit, extra_user_price: extraUserPrice, price, description,
       module_limits: Object.values(limits).map(({ module, record_limit, extra_record_price }) => ({ module, record_limit, extra_record_price })),
+      screen_limits: Object.values(screenLimits).map(({ module, screen, record_limit, extra_record_price }) => ({ module, screen, record_limit, extra_record_price })),
     }
     try {
-      if (plan) await api(S, 'PATCH', `/plans/${plan.id}/`, body)
-      else await api(S, 'POST', '/plans/', body)
+      const saved = plan
+        ? await api<Plan>(S, 'PATCH', `/plans/${plan.id}/`, body)
+        : await api<Plan>(S, 'POST', '/plans/', body)
       toast(`Plan ${name} saved`)
-      onSaved()
+      onSaved(saved?.id)
     } catch (e) { toast((e as Error).message, 'error') }
   }
 
@@ -321,6 +350,16 @@ function PlanCard({ plan, modules, onSaved, onCancel }: {
     try { await api(S, 'DELETE', `/plans/${plan.id}/`); toast(`Plan ${plan.name} deleted`); onSaved() } catch (e) { toast((e as Error).message, 'error') }
   }
 
+  const limitCells = (l: { record_limit: number; extra_record_price: number } | undefined,
+    set: (patch: { record_limit?: number; extra_record_price?: number }) => void) => (
+    <>
+      <td>{l ? <input type="number" min={0} value={l.record_limit} onChange={(e) => set({ record_limit: Number(e.target.value) })} /> : <span className="muted">Unlimited</span>}</td>
+      <td>{l ? (
+        <span className="price-input">{CURRENCY}<input type="number" min={0} step="0.01" value={l.extra_record_price} onChange={(e) => set({ extra_record_price: Number(e.target.value) })} /></span>
+      ) : <span className="muted">—</span>}</td>
+    </>
+  )
+
   return (
     <div className="card plan-card">
       <div className="plan-card-head">
@@ -328,35 +367,75 @@ function PlanCard({ plan, modules, onSaved, onCancel }: {
         <label>Plan name<input value={name} onChange={(e) => { setName(e.target.value); if (!plan) setCode(slugPreview(e.target.value)) }} /></label>
         <label>Code<input value={code} disabled={!!plan} onChange={(e) => setCode(e.target.value)} /></label>
         <label>User limit<input type="number" min={1} value={userLimit} onChange={(e) => setUserLimit(Number(e.target.value))} /></label>
+        <label>Extra user price<span className="price-input">{CURRENCY}<input type="number" min={0} step="0.01" value={extraUserPrice} title="Price of one extra user slot (0 = companies can't buy extra users)" onChange={(e) => setExtraUserPrice(Number(e.target.value))} /></span></label>
         <label>Price per month<span className="price-input">{CURRENCY}<input type="number" min={0} step="0.01" value={price} onChange={(e) => setPrice(Number(e.target.value))} /></span></label>
         {plan && <span className="muted">{plan.company_count} {plan.company_count === 1 ? 'company' : 'companies'}</span>}
       </div>
       <label>Short description (shown to companies)<input value={description} placeholder="e.g. For small teams getting started" onChange={(e) => setDescription(e.target.value)} /></label>
+
+      <h4 style={{ margin: '8px 0 0' }}>IWMS modules · records per form</h4>
+      <p className="muted small" style={{ margin: 0 }}>
+        One record = one save of the form. A form that also saves other details (e.g. a Daily Trip Plan with its
+        collection points) still counts as one record. Forms not limited are unlimited.
+      </p>
       <table className="perm-table">
-        <thead><tr><th>Module</th><th>Limited</th><th>Records included</th><th>Price per extra record</th></tr></thead>
+        <thead><tr><th>Form</th><th>Limited</th><th>Records included</th><th>Price per extra record</th></tr></thead>
         <tbody>
-          {modules.map((m) => {
-            const l = limits[m.id]
-            return (
-              <tr key={m.id}>
-                <td>{m.name}</td>
-                <td>
-                  <input type="checkbox" checked={!!l} onChange={(e) => setLimits((ls) => {
-                    const next = { ...ls }
-                    if (e.target.checked) next[m.id] = { module: m.id, record_limit: 10, extra_record_price: 0 }
-                    else delete next[m.id]
-                    return next
-                  })} />
-                </td>
-                <td>{l ? <input type="number" min={0} value={l.record_limit} onChange={(e) => setLimit(m.id, { record_limit: Number(e.target.value) })} /> : <span className="muted">Unlimited</span>}</td>
-                <td>{l ? (
-                  <span className="price-input">{CURRENCY}<input type="number" min={0} step="0.01" value={l.extra_record_price} onChange={(e) => setLimit(m.id, { extra_record_price: Number(e.target.value) })} /></span>
-                ) : <span className="muted">—</span>}</td>
-              </tr>
-            )
-          })}
+          {builtin.map((m) => (
+            <Fragment key={m.id}>
+              <tr><td colSpan={4} style={{ background: 'var(--surface-2)' }}><strong>{m.name}</strong></td></tr>
+              {(m.plan_forms ?? []).map((f) => {
+                const l = screenLimits[f.screen]
+                return (
+                  <tr key={f.screen}>
+                    <td style={{ paddingLeft: 24 }}>
+                      {f.label}
+                      {f.parts.length > 0 && <div className="muted small">with {f.parts.join(', ')}</div>}
+                    </td>
+                    <td>
+                      <input type="checkbox" checked={!!l} onChange={(e) => setScreenLimits((ls) => {
+                        const next = { ...ls }
+                        if (e.target.checked) next[f.screen] = { module: m.id, screen: f.screen, record_limit: 10, extra_record_price: 0 }
+                        else delete next[f.screen]
+                        return next
+                      })} />
+                    </td>
+                    {limitCells(l, (patch) => setScreenLimit(f.screen, patch))}
+                  </tr>
+                )
+              })}
+            </Fragment>
+          ))}
         </tbody>
       </table>
+
+      {custom.length > 0 && (
+        <>
+          <h4 style={{ margin: '8px 0 0' }}>Custom modules · records per module</h4>
+          <table className="perm-table">
+            <thead><tr><th>Module</th><th>Limited</th><th>Records included</th><th>Price per extra record</th></tr></thead>
+            <tbody>
+              {custom.map((m) => {
+                const l = limits[m.id]
+                return (
+                  <tr key={m.id}>
+                    <td>{m.name}</td>
+                    <td>
+                      <input type="checkbox" checked={!!l} onChange={(e) => setLimits((ls) => {
+                        const next = { ...ls }
+                        if (e.target.checked) next[m.id] = { module: m.id, record_limit: 10, extra_record_price: 0 }
+                        else delete next[m.id]
+                        return next
+                      })} />
+                    </td>
+                    {limitCells(l, (patch) => setLimit(m.id, patch))}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </>
+      )}
       <div className="form-actions">
         {plan ? <button className="danger" onClick={remove}>Delete plan</button> : <button onClick={onCancel}>Cancel</button>}
         <button className="primary" onClick={save}>{plan ? 'Save plan' : 'Create plan'}</button>
@@ -437,23 +516,36 @@ function ExtraRecords() {
 function AddExtraRecords({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [companies, setCompanies] = useState<Company[]>([])
   const [plans, setPlans] = useState<Plan[]>([])
-  const [form, setForm] = useState({ company: 0, module: 0, quantity: 1, unit_price: '', note: '' })
+  const [allModules, setAllModules] = useState<Module[]>([])
+  const [form, setForm] = useState({ company: 0, module: 0, screen: '', quantity: 1, unit_price: '', note: '' })
   const [error, setError] = useState('')
   useEffect(() => {
     api<Company[]>(S, 'GET', '/companies/').then(setCompanies)
     api<Plan[]>(S, 'GET', '/plans/').then(setPlans)
+    api<Module[]>(S, 'GET', '/modules/').then(setAllModules)
   }, [])
 
   const company = companies.find((c) => c.id === form.company)
-  const planLimit = plans.find((p) => p.id === company?.plan)?.module_limits.find((l) => l.module === form.module)
-  const price = form.unit_price === '' ? planLimit?.extra_record_price ?? 0 : Number(form.unit_price)
+  // module -1 = extra user slots (sent as module: null). Built-in modules are
+  // limited per sub-module, so they also need a sub-module (screen).
+  const plan = plans.find((p) => p.id === company?.plan)
+  const chosen = allModules.find((m) => m.id === form.module)
+  const subModules = chosen?.kind === 'builtin' ? chosen.plan_forms ?? [] : []
+  const needsScreen = subModules.length > 0
+  const planPrice = form.module === -1
+    ? plan?.extra_user_price ?? 0
+    : needsScreen
+      ? plan?.screen_limits.find((l) => l.screen === form.screen)?.extra_record_price ?? 0
+      : plan?.module_limits.find((l) => l.module === form.module)?.extra_record_price ?? 0
+  const price = form.unit_price === '' ? planPrice : Number(form.unit_price)
 
   async function submit(e: FormEvent) {
     e.preventDefault()
     setError('')
     try {
       await api(S, 'POST', '/extra-records/', {
-        company: form.company, module: form.module, quantity: form.quantity, note: form.note, status: 'paid',
+        company: form.company, module: form.module === -1 ? null : form.module, screen: needsScreen ? form.screen : '',
+        quantity: form.quantity, note: form.note, status: 'paid',
         ...(form.unit_price === '' ? {} : { unit_price: Number(form.unit_price) }),
       })
       onSaved()
@@ -471,21 +563,30 @@ function AddExtraRecords({ onClose, onSaved }: { onClose: () => void; onSaved: (
           </select>
         </label>
         <label>Module
-          <select value={form.module} required disabled={!company} onChange={(e) => setForm({ ...form, module: Number(e.target.value) })}>
+          <select value={form.module} required disabled={!company} onChange={(e) => setForm({ ...form, module: Number(e.target.value), screen: '' })}>
             <option value={0} disabled>Choose…</option>
+            <option value={-1}>User logins (extra users)</option>
             {company?.modules.map((m) => <option key={m.module} value={m.module}>{m.module_name}</option>)}
           </select>
         </label>
+        {needsScreen && (
+          <label>Form
+            <select value={form.screen} required onChange={(e) => setForm({ ...form, screen: e.target.value })}>
+              <option value="" disabled>Choose…</option>
+              {subModules.map((f) => <option key={f.screen} value={f.screen}>{f.label}</option>)}
+            </select>
+          </label>
+        )}
         <div className="two-col">
           <label>Quantity<input type="number" min={1} value={form.quantity} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} /></label>
-          <label>Price per record ({CURRENCY})<input type="number" min={0} step="0.01" placeholder={`Plan price: ${planLimit?.extra_record_price ?? 0}`} value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: e.target.value })} /></label>
+          <label>Price per record ({CURRENCY})<input type="number" min={0} step="0.01" placeholder={`Plan price: ${planPrice}`} value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: e.target.value })} /></label>
         </div>
         <label>Note<input value={form.note} placeholder="e.g. paid by bank transfer" onChange={(e) => setForm({ ...form, note: e.target.value })} /></label>
         <div className="total-line">Total: <strong>{money(price * form.quantity)}</strong></div>
         {error && <div className="error">{error}</div>}
         <div className="form-actions">
           <button type="button" onClick={onClose}>Cancel</button>
-          <button className="primary" disabled={!form.company || !form.module}>Add as paid</button>
+          <button className="primary" disabled={!form.company || !form.module || (needsScreen && !form.screen)}>Add as paid</button>
         </div>
       </form>
     </Modal>

@@ -1,5 +1,5 @@
 import { LogOut } from "lucide-react";
-import { afterSignOutPath } from "@/utils/companyScope";
+import { afterSignOutPath, getCompanySlug } from "@/utils/companyScope";
 import { useNavigate } from "react-router-dom";
 import { useUser } from "@/contexts/UserContext";
 import { clearAuthSession } from "@/utils/authStorage";
@@ -19,10 +19,13 @@ export default function UserDropdown() {
     await endLoginSession("admin", "manual");
     clearAuthSession();
     setUser(null);
-    navigate(afterSignOutPath(), { replace: true });
+    const next = afterSignOutPath();
+    if (next) navigate(next, { replace: true });
   }
 
   const initial = displayName?.trim().charAt(0).toUpperCase() || "?";
+  // Company logins: avatar + name open the Company profile (plan, usage, upgrades).
+  const hasCompany = Boolean(getCompanySlug());
 
   // User chip: initial avatar, name and sign-out in one pill.
   return (
@@ -32,17 +35,24 @@ export default function UserDropdown() {
         isDark ? glassCapsuleClasses.dark : glassCapsuleClasses.light,
       )}
     >
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-linear-to-br from-teal-500 to-indigo-500 text-sm font-bold text-white">
-        {initial}
-      </span>
-      <span
-        className={cn(
-          "max-w-[120px] truncate text-sm font-semibold",
-          isDark ? "text-slate-200" : "text-gray-800",
-        )}
+      <button
+        type="button"
+        onClick={hasCompany ? () => navigate("/profile") : undefined}
+        title={hasCompany ? "Company profile" : undefined}
+        className={cn("flex items-center gap-2 rounded-lg", hasCompany ? "cursor-pointer" : "cursor-default")}
       >
-        {displayName}
-      </span>
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-linear-to-br from-teal-500 to-indigo-500 text-sm font-bold text-white">
+          {initial}
+        </span>
+        <span
+          className={cn(
+            "max-w-[120px] truncate text-sm font-semibold",
+            isDark ? "text-slate-200" : "text-gray-800",
+          )}
+        >
+          {displayName}
+        </span>
+      </button>
 
       <button
         onClick={handleSignOut}

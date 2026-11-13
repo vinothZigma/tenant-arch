@@ -70,7 +70,8 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       clearAuthSession();
       setUser(null);
 
-      navigate(afterSignOutPath(), { replace: true });
+      const next = afterSignOutPath();
+      if (next) navigate(next, { replace: true });
     } catch {
       toast({
         title: t("common.logout_failed_title"),

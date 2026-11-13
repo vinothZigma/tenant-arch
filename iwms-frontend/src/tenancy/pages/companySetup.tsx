@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  api, apiUpload, money,
+  api, apiUpload, money, planLimitLines, usageBars,
   type Company, type CompanyAdminRow, type Field, type FieldType, type Module, type ModuleCaps, type NewAdmin, type Plan,
   type Id, type SuperProject,
 } from '../api'
@@ -11,6 +11,7 @@ import { FieldInput, formatValue, Modal, UsageBar } from '../components'
 import { BrandMark, EmptyState, Icon, Loading, LogoUploader, PageHeader, ThemePicker, useToast } from '../ui'
 import { DEFAULT_THEME } from '../theme'
 import { ProjectStructure, screensFromTree, type DbModule, type Screens } from './projectStructure'
+import { projectSlugs } from '../../utils/urlScope'
 
 const S = 'super' as const
 
@@ -344,10 +345,12 @@ export function CompanyWizard() {
                   <div className="plan-price">{pl.price > 0 ? <>{money(pl.price)}<span>/month</span></> : 'Free'}</div>
                   <ul className="plan-features">
                     <li><Icon name="users" size={15} /> <span>{pl.user_limit} users {validAdmins.length > pl.user_limit && <em className="error-text">(you added {validAdmins.length} admins)</em>}</span></li>
-                    {usedCodes.map((code) => {
-                      const l = pl.module_limits.find((x) => modules.find((m) => m.id === x.module)?.code === code)
-                      return <li key={code}><Icon name="check" size={15} /> <span>{l ? `${l.record_limit.toLocaleString('en-IN')} ${moduleName(code).toLowerCase()}` : `Unlimited ${moduleName(code).toLowerCase()}`}{l && l.extra_record_price > 0 && <span className="muted"> · then {money(l.extra_record_price)} each</span>}</span></li>
-                    })}
+                    {planLimitLines(pl, usedCodes.flatMap((code) => {
+                      const m = modules.find((x) => x.code === code)
+                      return m ? [{ id: m.id, name: moduleName(code) }] : []
+                    })).map((l) => (
+                      <li key={l.key}><Icon name="check" size={15} /> <span>{l.text}{l.price > 0 && <span className="muted"> · then {money(l.price)} each</span>}</span></li>
+                    ))}
                   </ul>
                 </button>
               ))}
@@ -519,6 +522,8 @@ function ProjectsTab({ company, onChange }: { company: Company; onChange: () => 
   }
 
   if (!projects) return <Loading />
+  // Same slugs the IWMS app puts in its URLs (/<company>/<project>/...).
+  const slugs = projectSlugs(projects.map((p) => ({ unique_id: String(p.id), name: p.name })))
   return (
     <>
       <div className="section-title-row">
@@ -540,6 +545,10 @@ function ProjectsTab({ company, onChange }: { company: Company; onChange: () => 
               </div>
               <div className="small"><span className="muted">Admins:</span> {p.admins.map((a) => a.full_name || a.username).join(', ') || <span className="error-text">none</span>}</div>
               <div className="muted small">{p.staff_with_access} staff with access</div>
+              {(() => {
+                const path = `/${company.slug}/${slugs.get(String(p.id))}/login`
+                return <div className="small"><span className="muted">Login page:</span> <a href={path} target="_blank" rel="noreferrer">{path}</a></div>
+              })()}
               <div className="btn-group project-actions">
                 <Link className="button sm primary" to={`/superadmin/companies/${company.id}/projects/${p.id}`}>
                   <Icon name="shield" size={14} /> Permissions & fields
@@ -798,7 +807,7 @@ function PlanTab({ company, onSaved }: { company: Company; onSaved: () => void }
       {company.usage && (
         <div className="card usage-panel" style={{ marginBottom: 18 }}>
           <UsageBar label="Users" used={company.usage.users_used} limit={company.usage.user_limit} />
-          {Object.entries(company.usage.modules).map(([code, q]) => <UsageBar key={code} label={q.module_name + (q.extra ? ` (+${q.extra})` : '')} used={q.used} limit={q.limit} />)}
+          {usageBars(company.usage).map((q) => <UsageBar key={q.key} label={q.label + (q.extra ? ` (+${q.extra})` : '')} used={q.used} limit={q.limit} />)}
         </div>
       )}
       <div className="plan-grid">
@@ -808,10 +817,9 @@ function PlanTab({ company, onSaved }: { company: Company; onSaved: () => void }
             <h3>{pl.name}</h3>
             <div className="plan-price">{pl.price > 0 ? <>{money(pl.price)}<span>/month</span></> : 'Free'}</div>
             <ul className="plan-features"><li><Icon name="users" size={15} /> <span>{pl.user_limit} users</span></li>
-              {company.modules.map((m) => {
-                const l = pl.module_limits.find((x) => x.module === m.module)
-                return <li key={m.module}><Icon name="check" size={15} /> <span>{l ? `${l.record_limit.toLocaleString('en-IN')} ${m.module_name.toLowerCase()}` : `Unlimited ${m.module_name.toLowerCase()}`}</span></li>
-              })}
+              {planLimitLines(pl, company.modules.map((m) => ({ id: m.module, name: m.module_name }))).map((l) => (
+                <li key={l.key}><Icon name="check" size={15} /> <span>{l.text}</span></li>
+              ))}
             </ul>
           </button>
         ))}

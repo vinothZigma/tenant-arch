@@ -1,3 +1,5 @@
+import { appPathname } from "@/utils/urlScope";
+
 /* Pending in-app navigation, shared by RouteProgress (which shows the
    loader) and menus that navigate programmatically. */
 let pendingPath: string | null = null;
@@ -16,7 +18,7 @@ export const subscribePendingRoute = (listener: () => void) => {
   };
 };
 
-const currentPath = () => window.location.pathname + window.location.search;
+const currentPath = () => appPathname() + window.location.search;
 
 /** Mark a programmatic navigation (navigate(path)) as pending. */
 export function startRouteProgress(path: string) {

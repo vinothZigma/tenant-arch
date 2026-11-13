@@ -35,7 +35,9 @@ const DashboardEncryptedRouter = lazy(
 // Multi-tenancy: super admin console and company workspaces (src/tenancy/).
 const TenancyRoot = lazy(() => import("@/tenancy/TenancyRoot"));
 const CompanyLogin = lazy(() => import("@/pages/CompanyAuth").then((m) => ({ default: m.CompanyLogin })));
+const ScopedLogin = lazy(() => import("@/pages/CompanyAuth").then((m) => ({ default: m.ScopedLogin })));
 const CompanyEnter = lazy(() => import("@/pages/CompanyAuth").then((m) => ({ default: m.CompanyEnter })));
+const CompanyProfile = lazy(() => import("@/pages/admin/companyProfile/CompanyProfile"));
 const AdminLayout = lazy(() =>
   import("@/layouts/admin/AdminLayout").then((m) => ({ default: m.AdminLayout })),
 );
@@ -58,6 +60,9 @@ import { adminLandingPath, hasAnyPermission } from "@/utils/permissions";
 import { useDashboardMenuItems } from "@/layouts/dashboard/dashboardMenu";
 import { sessionStore } from "@/utils/sessionStore";
 import { getTabToken, setCompanySlug } from "@/utils/companyScope";
+import { getUrlScope } from "@/utils/urlScope";
+import { isAuthSessionActive } from "@/utils/authStorage";
+import { UrlScopeSync } from "@/components/auth/UrlScopeSync";
 
 const ADMIN_ACCESS_ROLES: UserRole[] = [DEFAULT_ROLE, ...ADMIN_ROLES];
 
@@ -151,20 +156,26 @@ function DashboardRouteGuard({ children }: { children: ReactNode }) {
 
 // Multi-tenancy (one database per company):
 //   /superadmin/...      the super admin console (src/tenancy/)
-//   /<slug>/login, /<slug>  a company's sign-in: the IWMS screens, scoped to
-//                        that company (pages/CompanyAuth.tsx, utils/companyScope.ts)
+//   /<slug>/<project>/login, /<slug>/<project>/<IWMS route>
+//                        a company's IWMS screens for one project. The prefix is
+//                        the router basename (utils/urlScope.ts), so the routes
+//                        below never see it; "/login" is the company sign-in.
+//   /<slug>/login, /<slug>  a company's sign-in without a project in the URL:
+//                        after sign-in the prefix is added (UrlScopeSync)
+//                        (pages/CompanyAuth.tsx, utils/companyScope.ts)
 // Matched before the IWMS routes, not ranked with them, so "/<slug>/login"
 // never competes with "/:encMaster/:encModule". A first segment is a company
 // slug when it is not an IWMS route (backend RESERVED_SLUGS keeps companies
 // off these) and not an encrypted IWMS screen segment: CryptoJS AES output
 // always starts with "U2FsdGVkX1", which a lowercase slug never does.
-const IWMS_TOP_SEGMENTS = new Set(["", "auth", "admin", "dashboard", "district", "localbody", "audits", "api", "static", "media"]);
+const IWMS_TOP_SEGMENTS = new Set(["", "auth", "login", "admin", "dashboard", "district", "localbody", "audits", "api", "static", "media"]);
 
 function isSuperConsolePath(pathname: string) {
   return pathname === "/superadmin" || pathname.startsWith("/superadmin/");
 }
 
 function companySlugOf(pathname: string): string | null {
+  if (getUrlScope()) return null; // already under /<slug>/<project>
   const m = pathname.match(/^\/([a-z0-9-]{1,40})(\/login)?\/?$/);
   if (!m || IWMS_TOP_SEGMENTS.has(m[1]) || m[1] === "superadmin") return null;
   return m[1];
@@ -191,15 +202,18 @@ export default function App() {
   }
   // The plain sign-in page signs in without a company in the URL: the backend
   // finds the company from the username (as before multi-tenancy).
-  if (pathname === "/auth" && !getTabToken()) setCompanySlug(null);
+  const scoped = getUrlScope() !== null;
+  if (pathname === "/auth" && !scoped && !getTabToken()) setCompanySlug(null);
   // No loading card while a sign-in page downloads.
   const onAuthPage = pathname.startsWith("/auth");
   return (
     <Suspense fallback={onAuthPage ? null : <PageLoader fullHeight />}>
       <SessionIdleGuard />
+      <UrlScopeSync />
       <Routes>
         {/* ── Public auth routes ── */}
         <Route path="/auth" element={<Auth />} />
+        {scoped && <Route path="/login" element={<ScopedLogin />} />}
         <Route path="/auth/forgot-password" element={<ForgotPassword />} />
         <Route path="/auth/verify-otp" element={<VerifyOTP />} />
         <Route path="/auth/reset-password" element={<ResetPassword />} />
@@ -214,7 +228,18 @@ export default function App() {
         {/* The site root opens the super admin console. Companies sign in at
              /<slug>/login; only a super admin's "Open workspace" tab (which
              reloads to "/") lands on that company's screens. */}
-        <Route path="/" element={getTabToken() ? <HomeRedirect /> : <Navigate to="/superadmin" replace />} />
+        <Route
+          path="/"
+          element={
+            scoped ? (
+              isAuthSessionActive() ? <HomeRedirect /> : <Navigate to="/login" replace />
+            ) : getTabToken() ? (
+              <HomeRedirect />
+            ) : (
+              <Navigate to="/superadmin" replace />
+            )
+          }
+        />
 
         {/* ── Staff / user dashboard ── */}
         <Route path="/dashboard" element={withDashboard(<DashboardHome />)} />
@@ -226,6 +251,8 @@ export default function App() {
         <Route path="/admin/superadmin-dashboard" element={withAdmin(<SuperadminDashboard />)} />
         <Route path="/admin/vehicle-status" element={withAdmin(<VehicleStatusDashboard />)} />
         <Route path="/audits/common-audit" element={withAdmin(<CommonAuditList />)} />
+        {/* Company profile: plan, usage, extra slots, plan upgrade (company logins). */}
+        <Route path="/profile" element={withAdmin(<CompanyProfile />)} />
         <Route path="/:encMaster/:encModule" element={withAdmin(<AdminEncryptedRouter />)} />
         <Route path="/:encMaster/:encModule/new" element={withAdmin(<AdminEncryptedRouter />)} />
         <Route path="/:encMaster/:encModule/:id/edit" element={withAdmin(<AdminEncryptedRouter />)} />

@@ -5,9 +5,11 @@ from rest_framework import serializers
 from app.models.superadmin_masters.company import Company
 from app.models.tenancy.master import (
     FIELD_TYPES, CompanyModule, ExtraRecordPurchase, Module, Plan, PlanChangeRequest, PlanModuleLimit,
+    PlanScreenLimit,
 )
+from .sub_modules import module_sub_modules, screen_label
 
-from .billing import company_usage, request_extra_records
+from .billing import USERS_LABEL, company_usage, request_extra_records
 from .companies import admin_usernames
 from .logos import clean_theme_color, logo_url
 from .module_tables import SYSTEM_COLUMNS
@@ -52,14 +54,38 @@ class PlanModuleLimitSerializer(serializers.ModelSerializer):
         fields = ["module", "module_name", "record_limit", "extra_record_price"]
 
 
+class PlanScreenLimitSerializer(serializers.ModelSerializer):
+    """A plan's limit for one sub-module of a built-in module."""
+    module = serializers.PrimaryKeyRelatedField(queryset=Module.objects.filter(kind=Module.BUILTIN))
+    module_name = serializers.CharField(source="module.name", read_only=True)
+    label = serializers.SerializerMethodField()
+    extra_record_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+
+    class Meta:
+        model = PlanScreenLimit
+        fields = ["module", "module_name", "screen", "label", "record_limit", "extra_record_price"]
+
+    def get_label(self, obj):
+        return screen_label(obj.screen)
+
+    def validate(self, attrs):
+        allowed = {s["screen"] for s in module_sub_modules(attrs["module"].code)}
+        if attrs["screen"] not in allowed:
+            raise serializers.ValidationError(
+                {"screen": f'{attrs["screen"]!r} is not a sub-module of {attrs["module"].name} with records.'})
+        return attrs
+
+
 class PlanSerializer(serializers.ModelSerializer):
     company_count = serializers.SerializerMethodField()
     price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False)
     module_limits = PlanModuleLimitSerializer(many=True, required=False)
+    screen_limits = PlanScreenLimitSerializer(many=True, required=False)
 
     class Meta:
         model = Plan
-        fields = ["id", "code", "name", "description", "price", "user_limit", "company_count", "module_limits"]
+        fields = ["id", "code", "name", "description", "price", "user_limit", "extra_user_price",
+                  "company_count", "module_limits", "screen_limits"]
 
     def get_company_count(self, obj):
         return obj.companies.filter(is_deleted=False).count()
@@ -80,16 +106,37 @@ class PlanSerializer(serializers.ModelSerializer):
             keep.append(item["module"].id)
         plan.module_limits.exclude(module_id__in=keep).delete()
 
+    def validate_screen_limits(self, value):
+        screens = [item["screen"] for item in value]
+        if len(screens) != len(set(screens)):
+            raise serializers.ValidationError("Each sub-module can only be listed once.")
+        return value
+
+    def _save_screen_limits(self, plan, limits):
+        if limits is None:
+            return
+        keep = []
+        for item in limits:
+            PlanScreenLimit.objects.update_or_create(plan=plan, screen=item["screen"], defaults={
+                "module": item["module"], "record_limit": item["record_limit"],
+                "extra_record_price": item["extra_record_price"]})
+            keep.append(item["screen"])
+        plan.screen_limits.exclude(screen__in=keep).delete()
+
     def create(self, validated_data):
         limits = validated_data.pop("module_limits", [])
+        screen_limits = validated_data.pop("screen_limits", [])
         plan = super().create(validated_data)
         self._save_limits(plan, limits)
+        self._save_screen_limits(plan, screen_limits)
         return plan
 
     def update(self, instance, validated_data):
         limits = validated_data.pop("module_limits", None)
+        screen_limits = validated_data.pop("screen_limits", None)
         plan = super().update(instance, validated_data)
         self._save_limits(plan, limits)
+        self._save_screen_limits(plan, screen_limits)
         return plan
 
 
@@ -100,9 +147,12 @@ class ModuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = Module
         fields = ["id", "code", "name", "description", "kind", "model_label", "fields", "is_active", "sub_modules",
-                  "core", "tables", "depends_on"]
+                  "plan_forms", "core", "tables", "depends_on"]
         read_only_fields = ["kind", "model_label"]
 
+    # The module's forms a plan can limit (sub_modules.FORMS): main screen,
+    # label and what else the same form saves.
+    plan_forms = serializers.SerializerMethodField()
     core = serializers.SerializerMethodField()
     tables = serializers.SerializerMethodField()
     depends_on = serializers.SerializerMethodField()
@@ -113,6 +163,12 @@ class ModuleSerializer(serializers.ModelSerializer):
         if obj.kind != Module.BUILTIN:
             return {"core": False, "tables": [f"module_{obj.code}"], "depends_on": []}
         return graph_json().get(obj.code, {"core": True, "tables": [], "depends_on": []})
+
+    def get_plan_forms(self, obj):
+        if obj.kind != Module.BUILTIN:
+            return []
+        return [{"screen": f["screen"], "label": f["label"], "parts": list(f["parts"])}
+                for f in module_sub_modules(obj.code)]
 
     def get_core(self, obj):
         return self._graph(obj)["core"]
@@ -129,7 +185,10 @@ class ModuleSerializer(serializers.ModelSerializer):
         from app.utils import permission_catalog as catalog
 
         module = catalog.MODULES.get(obj.code) or {"screens": []}
-        return [{"name": s["name"], "label": s["label"]} for s in module["screens"] if not s.get("superadmin_only")]
+        # limitable: has its own records, so a plan can set a record limit on it.
+        limitable = {s["screen"] for s in module_sub_modules(obj.code)}
+        return [{"name": s["name"], "label": s["label"], "limitable": s["name"] in limitable}
+                for s in module["screens"] if not s.get("superadmin_only")]
 
     def validate_fields(self, value):
         if self.instance is not None and self.instance.kind == Module.BUILTIN:
@@ -149,24 +208,38 @@ class ModuleSerializer(serializers.ModelSerializer):
 
 class ExtraRecordPurchaseSerializer(serializers.ModelSerializer):
     company = serializers.PrimaryKeyRelatedField(queryset=Company.objects.filter(is_deleted=False))
-    module = serializers.PrimaryKeyRelatedField(queryset=Module.objects.all())
+    # Empty module = extra USER slots.
+    module = serializers.PrimaryKeyRelatedField(queryset=Module.objects.all(), allow_null=True, required=False)
     company_name = serializers.CharField(source="company.name", read_only=True)
-    module_name = serializers.CharField(source="module.name", read_only=True)
+    module_name = serializers.SerializerMethodField()
+    screen = serializers.CharField(required=False, allow_blank=True, default="")
     quantity = serializers.IntegerField(min_value=1, max_value=100000)
     unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False)
     status = serializers.ChoiceField(choices=ExtraRecordPurchase.STATUSES, default=ExtraRecordPurchase.PAID)
 
     class Meta:
         model = ExtraRecordPurchase
-        fields = ["id", "company", "company_name", "module", "module_name", "quantity", "unit_price",
+        fields = ["id", "company", "company_name", "module", "screen", "module_name", "quantity", "unit_price",
                   "total_amount", "status", "requested_by", "note", "created_at", "paid_at"]
         read_only_fields = ["total_amount", "requested_by", "created_at", "paid_at"]
+
+    def get_module_name(self, obj):
+        if not obj.module:
+            return USERS_LABEL
+        return f"{obj.module.name} › {screen_label(obj.screen)}" if obj.screen else obj.module.name
+
+    def validate(self, attrs):
+        screen, module = attrs.get("screen") or "", attrs.get("module")
+        if screen and (module is None or screen not in {s["screen"] for s in module_sub_modules(module.code)}):
+            raise serializers.ValidationError({"screen": "Choose a sub-module of the chosen module."})
+        return attrs
 
     def create(self, d):
         """Super admin adding slots directly (e.g. paid offline)."""
         return request_extra_records(
-            d["company"], d["module"], d["quantity"], requested_by="superadmin",
-            status=d.get("status"), unit_price=d.get("unit_price"), note=d.get("note", ""))
+            d["company"], d.get("module"), d["quantity"], requested_by="superadmin",
+            status=d.get("status"), unit_price=d.get("unit_price"), note=d.get("note", ""),
+            screen=d.get("screen") or "")
 
 
 class CompanyModuleSerializer(serializers.ModelSerializer):

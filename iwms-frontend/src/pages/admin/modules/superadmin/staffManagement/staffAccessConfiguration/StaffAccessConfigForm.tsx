@@ -5,6 +5,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { Switch } from "@/components/ui/switch";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   CheckCircle2,
@@ -389,6 +390,9 @@ export default function StaffAccessConfigForm() {
         setOfficeEmail(String(data.contact_email ?? ""));
         setDoj(data.doj ? String(data.doj) : "");
         setUsername(String(data.username ?? ""));
+        // Keep the saved switch; it used to reset to on, so saving re-enabled
+        // a staff member whose login had been switched off.
+        setLoginEnabled(data.login_enabled !== false);
         const existingPassword = String(data.password ?? "");
         setPassword(existingPassword);
         setConfirmPassword(existingPassword);
@@ -1163,15 +1167,11 @@ export default function StaffAccessConfigForm() {
         </Select>
         <FieldError message={fieldErrors.staffUserTypeId} />
       </div>
-      <label className="flex items-center gap-3 text-sm font-medium text-gray-700 dark:text-gray-200">
-        <input
-          type="checkbox"
-          className="h-4 w-4"
-          checked={loginEnabled}
-          onChange={(event) => setLoginEnabled(event.target.checked)}
-        />
-        Login Enabled
-      </label>
+      <div className="flex items-center gap-3 text-sm font-medium text-gray-700 dark:text-gray-200">
+        <Switch id="loginEnabled" checked={loginEnabled} onCheckedChange={setLoginEnabled} />
+        <label htmlFor="loginEnabled">Login Enabled</label>
+        <span className="font-normal text-gray-500">{loginEnabled ? "Can sign in" : "Can't sign in"}</span>
+      </div>
     </div>
   );
 

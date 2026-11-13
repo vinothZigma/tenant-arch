@@ -18,7 +18,17 @@ export type NotifyOptions = {
   inputMaxLength?: number;
   /** Returns an error message to keep the dialog open, or null when valid. */
   inputValidator?: (value: string) => string | null | undefined;
+  /** A highlighted figure in a confirmation, e.g. { label: "Amount to pay now", value: "₹60" }. */
+  amount?: ConfirmationAmount;
   [key: string]: unknown;
+};
+
+export type ConfirmationAmount = {
+  label: string;
+  value: string;
+  /** Small lines under the figure (e.g. "3 × ₹20"). */
+  details?: string[];
+  hint?: string;
 };
 
 export type NotifyResult = {
@@ -43,6 +53,7 @@ export type ConfirmationRequest = {
   cancelLabel: string;
   destructive: boolean;
   input?: ConfirmationInput;
+  amount?: ConfirmationAmount;
 };
 
 type PendingConfirmation = ConfirmationRequest & {
@@ -127,6 +138,7 @@ function requestConfirmation(options: NotifyOptions): Promise<NotifyResult> {
       confirmLabel: toText(options.confirmButtonText) || "Confirm",
       cancelLabel: toText(options.cancelButtonText) || "Cancel",
       destructive: options.icon === "warning" || options.icon === "error",
+      amount: options.amount,
       input: options.input
         ? {
             label: toText(options.inputLabel),

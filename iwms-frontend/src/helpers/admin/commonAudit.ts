@@ -1,5 +1,6 @@
 import { decryptSegment } from "@/utils/routeCrypto";
 import { commonAuditApi } from ".";
+import { appPathname } from "@/utils/urlScope";
 
 export type ExcelAuditAction =
   | "download_template"
@@ -13,7 +14,7 @@ const readCurrentScreenNames = () => {
     return { moduleName: "unknown", endpointName: "unknown" };
   }
 
-  const segments = window.location.pathname
+  const segments = appPathname()
     .split("/")
     .filter(Boolean)
     .map((segment) => decryptSegment(segment) ?? segment);

@@ -11,7 +11,8 @@ from django.core.management.base import BaseCommand
 from django.db import models
 
 from app.models.superadmin_masters.company import Company
-from app.models.tenancy.master import Module, Plan, PlanModuleLimit
+from app.models.tenancy.master import Module, Plan, PlanModuleLimit, PlanScreenLimit
+from app.tenancy.sub_modules import primary_screen
 from app.utils import permission_catalog as catalog
 
 
@@ -164,8 +165,19 @@ class Command(BaseCommand):
                 module = Module.objects.filter(code=module_code).first()
                 if module is None:
                     continue
-                _, new = PlanModuleLimit.objects.get_or_create(
-                    plan=plan, module=module, defaults={"record_limit": records, "extra_record_price": extra_price})
+                if module.kind == Module.BUILTIN:
+                    # Built-in modules are limited per sub-module: the seed
+                    # value goes on the sub-module the module's records live in,
+                    # unless the plan already has sub-module limits for it.
+                    screen = primary_screen(module)
+                    if not screen or plan.screen_limits.filter(module=module).exists():
+                        continue
+                    _, new = PlanScreenLimit.objects.get_or_create(
+                        plan=plan, screen=screen,
+                        defaults={"module": module, "record_limit": records, "extra_record_price": extra_price})
+                else:
+                    _, new = PlanModuleLimit.objects.get_or_create(
+                        plan=plan, module=module, defaults={"record_limit": records, "extra_record_price": extra_price})
                 added += new
             self.stdout.write(f'Plan {name}: {"created" if created else "exists"} ({added} limits added)')
 

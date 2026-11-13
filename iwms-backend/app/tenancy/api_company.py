@@ -26,8 +26,9 @@ from app.models.tenancy.tenant import ModulePermission, ProjectAdmin, ProjectMod
 from .auth import CompanyUserAuthentication, IsCompanyAdmin, tenant_token
 from .billing import (
     CURRENCY, company_usage, guarded_create, module_quotas, plan_json, record_room,
-    request_extra_records, user_room,
+    request_extra_records, screen_quotas, user_room, USERS_CODE, USERS_LABEL,
 )
+from .sub_modules import screen_label
 from .db import register_tenant_db
 from .logos import clean_theme_color, logo_url, remove_logo, set_logo
 from .modules import STAFF_MODULE, builtin_model, ensure_lock_row, project_counts
@@ -145,13 +146,17 @@ class TenantView(APIView):
         usage = company_usage(self.request.company)
         visible = self.visible_codes(self.request.user)
         usage["modules"] = {c: q for c, q in usage["modules"].items() if c in visible}
+        usage["sub_modules"] = {s: q for s, q in usage["sub_modules"].items() if q["module_code"] in visible}
         return usage
 
     def usage_for_me(self):
         usage = self.usage()
         if self.request.user.is_company_admin:
             return {"usage": usage, "limits_reached": []}
-        full = [c for c, q in usage["modules"].items() if q["limit"] is not None and q["used"] >= q["limit"]]
+        full = [q["module_name"] for q in usage["modules"].values()
+                if q["limit"] is not None and q["used"] >= q["limit"]]
+        full += [f'{q["module_name"]} › {q["label"]}' for q in usage["sub_modules"].values()
+                 if q["limit"] is not None and q["used"] >= q["limit"]]
         return {"usage": None, "limits_reached": full}
 
 
@@ -557,7 +562,15 @@ class StaffDirectoryView(UserAdminView):
 # --- extra records / plans (company admin) --------------------------------------
 
 def purchase_json(p):
-    return {"id": p.pk, "module_code": p.module.code, "module_name": p.module.name, "quantity": p.quantity,
+    if p.module is None:
+        name = USERS_LABEL
+    elif p.screen:
+        name = f"{p.module.name} › {screen_label(p.screen)}"
+    else:
+        name = p.module.name
+    return {"id": p.pk,
+            "module_code": p.module.code if p.module else USERS_CODE, "screen": p.screen,
+            "module_name": name, "quantity": p.quantity,
             "unit_price": float(p.unit_price), "total_amount": float(p.total_amount), "status": p.status,
             "requested_by": p.requested_by, "created_at": p.created_at, "paid_at": p.paid_at}
 
@@ -570,19 +583,43 @@ class ExtraRecordListView(TenantView):
         return Response([purchase_json(p) for p in qs])
 
     def post(self, request):
-        cm = self.enabled_modules().get(request.data.get("module_code"))
-        if not cm:
-            raise ValidationError({"module_code": "Module not available for this company."})
+        """Ask for extra slots: module_code = a module's code, or "users" for
+        more logins. The super admin sees it under Extra records and marks it
+        paid, which adds the slots."""
+        code = request.data.get("module_code")
         try:
             quantity = int(request.data.get("quantity"))
         except (TypeError, ValueError):
             quantity = 0
         if not 1 <= quantity <= 100000:
             raise ValidationError({"quantity": "Enter a number between 1 and 100000."})
+        note = str(request.data.get("note") or "").strip()[:255]
+        if code == USERS_CODE:
+            if not request.company.plan:
+                raise ValidationError({"detail": "Users are unlimited: your company has no plan."})
+            purchase = request_extra_records(request.company, None, quantity,
+                                             requested_by=request.user.username, note=note)
+            return Response(purchase_json(purchase), status=201)
+        screen = str(request.data.get("screen") or "")
+        if screen:
+            # Extra records for a sub-module of a built-in module.
+            quota = screen_quotas(request.company, counts={}, only={screen}).get(screen)
+            if not quota or not self.enabled_modules().get(quota["module_code"]):
+                raise ValidationError({"screen": "Sub-module not available for this company."})
+            if quota["limit"] is None:
+                raise ValidationError({"detail": f'{quota["label"]} is unlimited on your plan.'})
+            cm = self.enabled_modules()[quota["module_code"]]
+            purchase = request_extra_records(request.company, cm.module, quantity,
+                                             requested_by=request.user.username, note=note, screen=screen)
+            return Response(purchase_json(purchase), status=201)
+        cm = self.enabled_modules().get(code)
+        if not cm:
+            raise ValidationError({"module_code": "Module not available for this company."})
         quota = module_quotas(request.company, counts={})[cm.module.code]
         if quota["limit"] is None:
             raise ValidationError({"detail": f"{cm.module.name} is unlimited on your plan."})
-        purchase = request_extra_records(request.company, cm.module, quantity, requested_by=request.user.username)
+        purchase = request_extra_records(request.company, cm.module, quantity,
+                                         requested_by=request.user.username, note=note)
         return Response(purchase_json(purchase), status=201)
 
 

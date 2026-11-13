@@ -27,6 +27,7 @@ import { ActionMenu } from "@/components/ui/ActionMenu";
 import { getEncryptedRoute } from "@/utils/routeCache";
 
 import { Switch } from "@/components/ui/switch";
+import { LoginSwitch } from "@/components/common/LoginSwitch";
 import QrPreviewDialog from "@/components/common/QrPreviewDialog";
 import { useFieldVisibility } from "@/hooks/useFieldVisibility";
 import { FilterBar } from "@/components/common/FilterBar";
@@ -55,6 +56,7 @@ const STAFF_CREATION_COLUMN_FIELDS: Record<string, string[]> = {
   salary_type: ["salary_type"],
   contact_mobile: ["contact_mobile", "mobile"],
   active_status: ["active_status", "is_active"],
+  login_enabled: ["login_enabled"],
   qr_code: ["qr_code"],
 };
 
@@ -364,7 +366,14 @@ export default function StaffCreationList() {
           formData.append(key, String(entryValue));
         });
 
-        await adminApi.staffCreation.update(row.unique_id, formData);
+        // Name the staff member's project: without it the backend looks only
+        // in the signed-in admin's own project (404 for other projects).
+        const rowProject = row.project_id || row.project_unique_id || projectId;
+        await adminApi.staffCreation.update(
+          row.unique_id,
+          formData,
+          rowProject ? { params: { project_id: rowProject } } : undefined,
+        );
         setStaffs((prev) =>
           prev.map((s) =>
             s.unique_id === row.unique_id ? { ...s, active_status: value } : s,
@@ -630,6 +639,27 @@ export default function StaffCreationList() {
             <Column
               header={t("common.status")}
               body={statusTemplate}
+              style={{ width: "9%" }}
+            />
+          )}
+
+          {showCol("login_enabled") && (
+            <Column
+              header={t("admin.staff_creation.login_enabled", "Login")}
+              body={(row: Staff) => (
+                <LoginSwitch
+                  screen="staffCreation"
+                  staffId={String(row.unique_id ?? "")}
+                  projectId={row.project_id || row.project_unique_id || projectId || null}
+                  checked={Boolean(row.login_enabled)}
+                  disabled={!canEdit}
+                  onChanged={(value) =>
+                    setStaffs((prev) =>
+                      prev.map((s) => (s.unique_id === row.unique_id ? { ...s, login_enabled: value } : s)),
+                    )
+                  }
+                />
+              )}
               style={{ width: "9%" }}
             />
           )}

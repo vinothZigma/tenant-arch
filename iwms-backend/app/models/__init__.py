@@ -15,7 +15,7 @@ from .superadmin.common_masters.state import State
 # GROUP: MULTI-TENANCY (plans, modules, project modules, staff access)
 # ============================================================
 from .tenancy.master import (
-    Plan, Module, CompanyModule, PlanModuleLimit, ExtraRecordPurchase, PlanChangeRequest, FormConfig,
+    Plan, Module, CompanyModule, PlanModuleLimit, PlanScreenLimit, ExtraRecordPurchase, PlanChangeRequest, FormConfig,
     PrintTemplate, PrintTemplateAssignment, ExcelColumnSetting,
 )
 from .tenancy.tenant import (

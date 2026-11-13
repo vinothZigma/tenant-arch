@@ -27,6 +27,7 @@ from app.utils.filters import (
 )
 from app.utils.pagination import LimitOffsetWithPage
 from app.utils.bulk_upload_mixin import BulkUploadMixin
+from app.utils.staff_login import parse_switch, set_staff_login
 
 
 class StaffcreationViewset(BulkUploadMixin, AuditViewSetMixin,CompanyScopedViewSet):
@@ -152,6 +153,12 @@ class StaffcreationViewset(BulkUploadMixin, AuditViewSetMixin,CompanyScopedViewS
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["patch"], url_path="login")
+    def set_login(self, request, staff_unique_id=None):
+        """The list's Login switch: only turns this staff member's login on/off."""
+        staff = self.get_object()
+        return Response(set_staff_login(staff, parse_switch(request.data.get("login_enabled")), request))
 
     @action(detail=True, methods=["post"], url_path="approve")
     def approve(self, request, staff_unique_id=None):

@@ -11,6 +11,8 @@
 // Signing in at /auth (no slug) clears the company: the backend then finds it
 // from the username, as before.
 
+import { getUrlScope } from "./urlScope";
+
 const COMPANY_KEY = "iwms:company";
 const TAB_TOKEN_KEY = "iwms:company-tab-token";
 
@@ -48,16 +50,24 @@ export const apiBaseFor = (apiRoot: string): string => {
   return slug ? apiRoot.replace(/\/api\/v1\/?$/, `/api/t/${encodeURIComponent(slug)}`) : apiRoot;
 };
 
-/** Where to send a signed-out user: the company's own login page, or /auth. */
+/** Where to send a signed-out user: the company's own login page, or /auth.
+ *  Under a /<company>/<project> URL this is router-relative ("/login"). */
 export const loginPath = (): string => {
+  if (getUrlScope()) return "/login";
   const slug = getCompanySlug();
   return slug ? `/${slug}/login` : "/auth";
 };
 
-/** Where to go after signing out; ends a super admin's company view. */
-export const afterSignOutPath = (): string => {
+/** Where to go after signing out; ends a super admin's company view.
+ *  null: already leaving by a full page load (the console is outside the
+ *  /<company>/<project> prefix, which the router can't navigate out of). */
+export const afterSignOutPath = (): string | null => {
   if (getTabToken()) {
     endTabCompanyView();
+    if (getUrlScope()) {
+      window.location.assign("/superadmin/companies");
+      return null;
+    }
     return "/superadmin/companies";
   }
   return loginPath();

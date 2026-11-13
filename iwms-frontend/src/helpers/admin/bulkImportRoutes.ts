@@ -1,4 +1,5 @@
 import { decryptSegment } from "@/utils/routeCrypto";
+import { appPathname } from "@/utils/urlScope";
 import { adminApi } from "./registry";
 import type { AdminEntity } from "./endpoints";
 import type { CrudHelpers } from "./crudHelpers";
@@ -67,7 +68,7 @@ const routeEntityBySlug: Record<string, AdminEntity> = {
 const readPlainPathSegments = () => {
   if (typeof window === "undefined") return [];
 
-  return window.location.pathname
+  return appPathname()
     .split("/")
     .filter(Boolean)
     .map((segment) => decryptSegment(segment) ?? segment);

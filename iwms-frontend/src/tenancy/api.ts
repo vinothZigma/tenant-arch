@@ -113,14 +113,51 @@ export const money = (n: number) => `${CURRENCY}${n.toLocaleString('en-IN', { ma
 
 // limit = plan limit + paid extra records; null = unlimited
 export interface ModuleQuota {
-  module_id: number; module_name: string; used: number; base_limit: number | null; extra: number
+  module_id: number; module_name: string; kind?: ModuleKind; used: number; base_limit: number | null; extra: number
   limit: number | null; extra_price: number; pending: number
 }
-export interface Usage { plan: string | null; users_used: number; user_limit: number | null; modules: Record<string, ModuleQuota> }
+// Built-in modules are limited per sub-module (screen).
+export interface SubModuleQuota extends ModuleQuota { module_code: string; screen: string; label: string }
+export interface Usage {
+  plan: string | null; users_used: number; user_limit: number | null; modules: Record<string, ModuleQuota>
+  sub_modules?: Record<string, SubModuleQuota>
+  // user_limit = plan users + paid extra user slots
+  user_base_limit?: number | null; user_extra?: number; user_pending?: number; extra_user_price?: number
+}
 export interface PlanModuleLimit { module: number; module_name?: string; record_limit: number; extra_record_price: number }
+/** A plan's limits for these modules, as feature lines: per sub-module where
+ *  the plan sets sub-module limits (built-in modules), else per module. */
+export function planLimitLines(pl: Plan, mods: { id: number; name: string }[]) {
+  const lines: { key: string; text: string; price: number }[] = []
+  for (const m of mods) {
+    const subs = (pl.screen_limits ?? []).filter((l) => l.module === m.id)
+    if (subs.length) {
+      for (const l of subs) lines.push({ key: l.screen, text: `${l.record_limit.toLocaleString('en-IN')} ${(l.label ?? l.screen).toLowerCase()}`, price: l.extra_record_price })
+      continue
+    }
+    const l = pl.module_limits.find((x) => x.module === m.id)
+    lines.push(l
+      ? { key: String(m.id), text: `${l.record_limit.toLocaleString('en-IN')} ${m.name.toLowerCase()}`, price: l.extra_record_price }
+      : { key: String(m.id), text: `Unlimited ${m.name.toLowerCase()}`, price: 0 })
+  }
+  return lines
+}
+
+/** Usage bars worth showing: custom modules, and built-in sub-modules with a limit. */
+export function usageBars(usage: Usage) {
+  const bars = Object.entries(usage.modules)
+    .filter(([, q]) => q.kind !== 'builtin')
+    .map(([code, q]) => ({ key: code, label: q.module_name, used: q.used, limit: q.limit, extra: q.extra }))
+  for (const [screen, q] of Object.entries(usage.sub_modules ?? {})) {
+    if (q.limit !== null) bars.push({ key: screen, label: `${q.module_name} › ${q.label}`, used: q.used, limit: q.limit, extra: q.extra })
+  }
+  return bars
+}
+
+export interface PlanScreenLimit { module: number; module_name?: string; screen: string; label?: string; record_limit: number; extra_record_price: number }
 export interface Plan {
   id: number; code: string; name: string; description: string; price: number; user_limit: number
-  company_count: number; module_limits: PlanModuleLimit[]
+  extra_user_price: number; company_count: number; module_limits: PlanModuleLimit[]; screen_limits: PlanScreenLimit[]
 }
 // Plans as a company sees them (limits only for its own modules)
 export interface PlanOption {
@@ -140,12 +177,16 @@ export interface SuperPlanRequest {
 }
 export type PurchaseStatus = 'pending' | 'paid' | 'cancelled'
 export interface Purchase {
-  id: number; company?: Id; company_name?: string; module?: number; module_code?: string; module_name: string
+  id: number; company?: Id; company_name?: string; module?: number; module_code?: string; screen?: string; module_name: string
   quantity: number; unit_price: number; total_amount: number; status: PurchaseStatus; requested_by: string
   note?: string; created_at: string; paid_at: string | null
 }
 export type ModuleKind = 'builtin' | 'custom'
-export interface Module { id: number; code: string; name: string; description: string; fields: Field[]; is_active: boolean; kind?: ModuleKind; model_label?: string; sub_modules?: { name: string; label: string }[] }
+export interface Module { id: number; code: string; name: string; description: string; fields: Field[]; is_active: boolean; kind?: ModuleKind; model_label?: string; sub_modules?: { name: string; label: string; limitable?: boolean }[]
+  // Forms a plan can limit (built-in modules): main screen, label, and what
+  // else the same form saves (counted as one record, e.g. Daily Trip Plan).
+  plan_forms?: PlanForm[] }
+export interface PlanForm { screen: string; label: string; parts: string[] }
 export interface Company {
   id: Id; name: string; slug: string; db_name: string; login_path: string; plan: number | null; plan_name: string | null; error?: string | null
   modules: CompanyModule[]; contact_email: string; logo_url: string | null; theme_color: string; is_active: boolean; created_at: string; usage: Usage | null

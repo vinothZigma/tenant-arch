@@ -25,6 +25,10 @@ const AdminBreadcrumb: React.FC = () => {
       return [{ ...home, isActive: true }];
     }
 
+    if (location.pathname === "/profile") {
+      return [home, { label: "Company profile", isActive: true }];
+    }
+
     const matched = findNavRoute(location.pathname);
 
     if (!matched) {

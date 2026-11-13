@@ -1,4 +1,5 @@
 import { LoadingCard } from "@/components/common/LoadingCard";
+import { toAppPath } from "@/utils/urlScope";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useLocation } from "react-router-dom";
 
@@ -39,7 +40,7 @@ const handleDocumentClick = (event: MouseEvent) => {
   if (anchor.hasAttribute("download")) return;
   const url = new URL(anchor.href, window.location.href);
   if (url.origin !== window.location.origin) return;
-  startRouteProgress(url.pathname + url.search);
+  startRouteProgress(toAppPath(url.pathname) + url.search);
 };
 
 /** Top progress bar plus a loading overlay on the page area while a menu

@@ -10,6 +10,11 @@ import "primeicons/primeicons.css";
 import "./index.css";
 import "./i18n";
 import { restoreAuthSession } from "./utils/authStorage";
+import { initUrlScope } from "./utils/urlScope";
+
+// A /<company>/<project>/... URL picks that company's API before the session
+// is restored from its cookie.
+initUrlScope();
 
 // Signed-in user data lives only in memory, so rebuild it from the auth
 // cookie before the first render — every reader of it is synchronous.
