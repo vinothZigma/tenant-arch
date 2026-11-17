@@ -182,7 +182,7 @@ export default function CompanyProfile() {
   const [target, setTarget] = useState(USERS);
   const [quantity, setQuantity] = useState(1);
   const [busy, setBusy] = useState(false);
-  // Upgrade plan: the plan tab shown (Basic / Medium / High …); null = current plan.
+  // Upgrade plan: the plan tab shown (Basic / Premium / Industry …); null = current plan.
   const [planTab, setPlanTab] = useState<number | null>(null);
 
   const isAdmin = Boolean(me?.usage);

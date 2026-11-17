@@ -369,6 +369,22 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--company",
+            type=str,
+            default="Blue Planet",
+            help=(
+                "TENANCY_MODE=per_db: the company whose own database is seeded "
+                "(name or slug, default Blue Planet). Afterwards every module is "
+                "switched on for its projects and it gets --plan if it has none."
+            ),
+        )
+        parser.add_argument(
+            "--plan",
+            type=str,
+            default="industry",
+            help="per_db: plan code given to the company when it has no plan (default industry).",
+        )
+        parser.add_argument(
             "--fresh",
             action="store_true",
             help="Delete ALL existing data in the database (manage.py flush) before seeding.",
@@ -400,6 +416,18 @@ class Command(BaseCommand):
                 return
         else:
             seeders = SEED_GROUPS["all"]
+
+        from app.tenancy.router import per_db_mode
+
+        if per_db_mode():
+            if options.get("fresh"):
+                # flush would empty the MASTER DB: every company, plan and module.
+                self.stdout.write(self.style.ERROR("--fresh is not allowed with TENANCY_MODE=per_db."))
+                return
+            from app.tenancy.seeding import seed_company
+
+            seed_company(self, seeders, options["company"], options["plan"])
+            return
 
         if options.get("fresh"):
             self.stdout.write(self.style.WARNING("Removing all existing data (flush)..."))

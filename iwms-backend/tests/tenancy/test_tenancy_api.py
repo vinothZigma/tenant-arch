@@ -316,7 +316,7 @@ class TestLimits:
     def test_plan_change_request_flow(self, sup):
         c = make_company(sup, "Mike")
         api = admin_client(c)
-        high = Plan.objects.get(code="high")
+        high = Plan.objects.get(code="industry")
         r = api.post(f"/api/t/{c.slug}/ws/plan-requests/", {"plan": high.pk, "note": "growing"}, format="json")
         assert r.status_code == 201
         again = api.post(f"/api/t/{c.slug}/ws/plan-requests/", {"plan": high.pk}, format="json")

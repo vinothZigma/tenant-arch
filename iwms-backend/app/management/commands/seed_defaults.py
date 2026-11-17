@@ -63,13 +63,16 @@ PLANS = [
     ("basic", "Basic", 5, 999, "For a single small project", {
         "staff-creations": (25, 20), "customers": (500, 2), "transport-masters": (5, 200), "waste-types": (100, 10),
         "schedule-setup": (50, 10), "assets": (50, 20), "vendors": (20, 20)}),
-    ("medium", "Medium", 25, 4999, "Several projects", {
+    ("premium", "Premium", 25, 4999, "Several projects", {
         "staff-creations": (200, 15), "customers": (5000, 1), "transport-masters": (40, 150),
         "waste-types": (1000, 5), "schedule-setup": (500, 5), "assets": (500, 15), "vendors": (200, 15)}),
-    ("high", "High", 100, 14999, "Large operations", {
+    ("industry", "Industry", 100, 14999, "Large operations", {
         "staff-creations": (2000, 10), "customers": (50000, 1), "transport-masters": (400, 100),
         "waste-types": (10000, 2), "schedule-setup": (5000, 2), "assets": (5000, 10), "vendors": (2000, 10)}),
 ]
+
+# Plan codes used before Basic/Premium/Industry (renamed in place, limits kept).
+RENAMED_PLANS = {"medium": ("premium", "Premium"), "high": ("industry", "Industry")}
 
 SKIP_COLUMNS = {"is_active", "is_deleted", "delete_reason", "created_by_id", "updated_by_id", "created_at",
                 "updated_at", "deleted_at", "deleted_by_id", "company_id", "project_id", "password"}
@@ -109,7 +112,7 @@ def catalog_routes():
 
 
 class Command(BaseCommand):
-    help = "Create the default plans (Basic/Medium/High) and modules (all IWMS modules + custom). Safe to re-run."
+    help = "Create the default plans (Basic/Premium/Industry) and modules (all IWMS modules + custom). Safe to re-run."
 
     def rename_old_builtin(self, old, new):
         """Move an earlier built-in code to its catalog code, everywhere."""
@@ -156,6 +159,11 @@ class Command(BaseCommand):
             _, created = Module.objects.get_or_create(code=code, defaults={
                 "name": name, "description": desc, "kind": Module.CUSTOM, "fields": fields})
             self.stdout.write(f'Module {name}: {"created" if created else "exists"}')
+
+        for old, (new, new_name) in RENAMED_PLANS.items():
+            if Plan.objects.filter(code=old).exists() and not Plan.objects.filter(code=new).exists():
+                Plan.objects.filter(code=old).update(code=new, name=new_name)
+                self.stdout.write(f"Plan {old} renamed to {new}")
 
         for code, name, users, price, desc, limits in PLANS:
             plan, created = Plan.objects.get_or_create(code=code, defaults={

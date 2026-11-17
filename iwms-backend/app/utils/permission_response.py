@@ -747,9 +747,18 @@ def resolve_permission_payload(**filters):
         from app.tenancy.iwms_forms import apply_hidden_fields
 
         payload["column_permissions"] = apply_hidden_fields(payload.get("column_permissions"))
+    effective = merge_permissions(permissions, extra) if extra else None
+    if per_db_mode() and get_current_tenant_db():
+        # Screen Management is the platform's (never granted in the console):
+        # a staff access row left over for it gives a company login nothing.
+        from app.tenancy.iwms_tables import HIDDEN_MODULES
+
+        current = effective if effective is not None else payload.get("permissions") or {}
+        if any(code in current for code in HIDDEN_MODULES):
+            effective = {main: screens for main, screens in current.items() if main not in HIDDEN_MODULES}
     return finalize_permission_payload(
         payload,
-        permissions=merge_permissions(permissions, extra) if extra else None,
+        permissions=effective,
         role_name=filters.get("role_name"),
         user_type=filters.get("user_type"),
         app_module=app_module,

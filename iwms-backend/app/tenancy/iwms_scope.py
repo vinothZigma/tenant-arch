@@ -11,7 +11,10 @@ with the projects:
   none, the projects they have access to.
 
 Only configurations created here are updated (tagged MANAGED); one set up by
-hand in the IWMS screens is left alone. Nobody gets an empty project list:
+hand in the IWMS screens is left alone. A company admin's managed
+configuration also lists the screens/actions the admin really has (the
+Console → Permissions grants of the projects they run, screen_grants), so the
+Staff Access Configuration list shows them from the start instead of 0. Nobody gets an empty project list:
 IWMS reads that as "every project".
 """
 from app.models.superadmin.role_management.staffUserType import StaffUserType
@@ -79,6 +82,50 @@ def _wanted_projects(alias):
     return wanted
 
 
+def sync_admin_permissions(alias, config, staff):
+    """The managed configuration's permission rows = the admin's grants
+    (tenancy_screen_grants). Inside tenant_context(alias)."""
+    from app.models.superadmin.screen_management.mainscreen import MainScreen
+    from app.models.superadmin.screen_management.userscreen import UserScreen
+    from app.models.superadmin.screen_management.userscreenaction import UserScreenAction
+    from app.models.superadmin.staff_management.staff_access_configuration import (
+        StaffAccessConfigurationPermission,
+    )
+
+    from .screen_grants import tenancy_screen_grants
+
+    grants = tenancy_screen_grants(staff.pk)
+    screens = {}
+    for us in UserScreen.objects.using(alias).filter(is_deleted=False):
+        screens.setdefault(us.userscreen_name, us)
+    mains = dict(MainScreen.objects.using(alias).filter(is_deleted=False).values_list("mainscreen_name", "unique_id"))
+    actions = {}
+    for uid, name in UserScreenAction.objects.using(alias).filter(is_deleted=False).values_list(
+            "unique_id", "action_name"):
+        actions.setdefault((name or "").lower(), uid)
+    wanted = {}
+    for main, by_screen in grants.items():
+        for screen_name, names in by_screen.items():
+            us = screens.get(screen_name)
+            if us is None:
+                continue
+            for name in names:
+                action_id = actions.get(name)
+                if action_id:
+                    wanted[(us.unique_id, action_id)] = us.mainscreen_id or mains.get(main)
+
+    rows = StaffAccessConfigurationPermission.objects.using(alias)
+    existing = {(p.userscreen_id, p.userscreenaction_id): p for p in rows.filter(
+        staff_access_configuration_id=config.unique_id, is_deleted=False)}
+    gone = [p.pk for key, p in existing.items() if key not in wanted]
+    if gone:
+        rows.filter(pk__in=gone).update(is_deleted=True, is_active=False)
+    for order, (key, main_id) in enumerate(wanted.items(), start=1):
+        if key not in existing:
+            rows.create(staff_access_configuration_id=config.unique_id, mainscreen_id=main_id,
+                        userscreen_id=key[0], userscreenaction_id=key[1], order_no=order)
+
+
 def sync_iwms_scopes(alias, company):
     from .iwms_tables import missing_tables
 
@@ -101,7 +148,7 @@ def sync_iwms_scopes(alias, company):
                 staff_id=staff.pk, is_deleted=False).first()
             if config is None:
                 if projects:
-                    StaffAccessConfiguration.objects.using(alias).create(
+                    config = StaffAccessConfiguration.objects.using(alias).create(
                         staff_id=staff.pk, company_id=company.unique_id, project_ids=",".join(projects),
                         description=MANAGED)
             elif config.description == MANAGED:
@@ -112,3 +159,6 @@ def sync_iwms_scopes(alias, company):
                     # No project left: switch the managed scope off (empty = all projects).
                     StaffAccessConfiguration.objects.using(alias).filter(pk=config.pk).update(
                         is_active=False, is_deleted=True)
+                    config = None
+            if config is not None and config.description == MANAGED and staff.is_company_admin:
+                sync_admin_permissions(alias, config, staff)

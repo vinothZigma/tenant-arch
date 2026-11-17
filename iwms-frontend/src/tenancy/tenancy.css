@@ -704,3 +704,18 @@ a.plan-pill:hover { text-decoration: none; background: var(--primary-ring); }
 .xc-blocked input[type=checkbox] { cursor: not-allowed; }
 .xc-reason { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: #92400e; }
 .xc-partial { font-size: 11.5px; color: #92400e; font-weight: 400; }
+
+/* Project → Permissions & fields: a sub-module made of several screens
+   (e.g. Daily Trip Plan) is a group row with its screens nested under it. */
+.tn .perm-group-label { display: inline-flex; align-items: center; gap: 8px; }
+.tn .perm-grid tr.perm-group td { background: color-mix(in srgb, var(--primary, #4f46e5) 5%, var(--surface)); }
+.tn .perm-grid tr.perm-child td:first-child { padding-left: 54px; }
+.tn .perm-child-label { position: relative; color: var(--text); }
+.tn .perm-child-label::before { content: ""; position: absolute; left: -16px; top: 50%; width: 9px; border-top: 1px solid var(--border); }
+.tn .perm-field-group { margin: 6px 0; }
+.tn .perm-field-group > .perm-group-label { padding: 6px 0; }
+.tn .perm-child-fields { margin-left: 30px; }
+@media (max-width: 640px) {
+  .tn .perm-grid tr.perm-child td:first-child { padding-left: 30px; }
+  .tn .perm-child-fields { margin-left: 12px; }
+}

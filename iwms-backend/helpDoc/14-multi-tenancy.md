@@ -32,8 +32,13 @@ branded login and a workspace.
 ```bash
 cp .env.example .env               # fill in DB settings, SECRET_KEY, ...
 python manage.py migrate           # master DB
-python manage.py seed_defaults     # plans Basic/Medium/High + modules (safe to re-run)
+python manage.py seed_defaults     # plans Basic/Premium/Industry + modules (safe to re-run)
 python manage.py createsuperuser   # platform super admin
+python manage.py seed              # demo data into Blue Planet's own DB (safe to re-run):
+                                   #   projects, staff, vehicles, customers, trips, complaints;
+                                   #   every module on for its projects, company admin
+                                   #   bp_admin / Admin@123 on all projects, developer login,
+                                   #   plan "industry" if it has none (--company, --plan)
 python manage.py runserver
 # frontend: npm run dev  ->  /superadmin/login
 ```

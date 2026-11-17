@@ -414,6 +414,16 @@ class StaffAccessConfigurationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
         )
         rows = list(rows.exclude(userscreenaction_id__in=show_action_ids).order_by("order_no"))
 
+        # Multi-tenancy: only what the super admin can grant in the console
+        # (no Screen Management / citizen-app screens) and the project has on.
+        from app.tenancy.screen_grants import grantable_screens
+
+        allowed = grantable_screens({r.project_id for r in rows if r.project_id})
+        if allowed is not None:
+            screen_names = dict(UserScreen.objects.filter(
+                unique_id__in={r.userscreen_id for r in rows}).values_list("unique_id", "userscreen_name"))
+            rows = [r for r in rows if screen_names.get(r.userscreen_id) in allowed.get(r.project_id, set())]
+
         project_lookup = {
             p.unique_id: p
             for p in Project.objects.filter(

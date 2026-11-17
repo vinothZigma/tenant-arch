@@ -1,10 +1,13 @@
 // Companies → (company) → (project): what the company's admins may use in the
 // IWMS screens for this project.
-//   Permissions    module → sub-module → View / Add / Edit / Delete / ...
-//   Module fields  module → sub-module → which fields show
+//   Permissions    module → sub-module → (screen →) View / Add / Edit / Delete / ...
+//   Module fields  module → sub-module → (screen →) which fields show
+// A sub-module made of several screens (catalog `group`, e.g. Daily Trip Plan =
+// Trip Assignments + Trip / Household Collection Points, Complaint Desk) shows
+// as one row whose ticks set all its screens, with the screens nested under it.
 // Saved in IWMS's own company screen/field permission tables (backend
 // app/tenancy/permissions.py).
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api, type Company } from '../api'
 import { EmptyState, Icon, Loading, PageHeader, useToast } from '../ui'
@@ -16,6 +19,7 @@ interface PermField { name: string; label: string; required: boolean; enabled: b
 interface PermScreen {
   name: string; label: string; available: boolean; actions: PermAction[]; fields: PermField[]
   in_project?: boolean   // false: turned off in Edit project → Modules (database level)
+  group?: string | null; group_label?: string | null
 }
 interface PermModule { code: string; name: string; screens: PermScreen[] }
 interface PermData { projects: { id: string; name: string }[]; project: string | null; modules: PermModule[] }
@@ -24,6 +28,31 @@ type Lists = Record<string, string[]>   // screen -> granted actions / enabled f
 type View = 'actions' | 'fields'
 
 const STANDALONE = new Set(['use'])   // actions that don't need View
+
+// A module's sub-modules in order: one screen, or a group of screens.
+type Item = { kind: 'screen'; screen: PermScreen } | { kind: 'group'; key: string; label: string; screens: PermScreen[] }
+
+function itemsOf(screens: PermScreen[]): Item[] {
+  const out: Item[] = []
+  const groups: Record<string, Extract<Item, { kind: 'group' }>> = {}
+  for (const s of screens) {
+    if (!s.group) { out.push({ kind: 'screen', screen: s }); continue }
+    if (!groups[s.group]) {
+      groups[s.group] = { kind: 'group', key: s.group, label: s.group_label || s.label, screens: [] }
+      out.push(groups[s.group])
+    }
+    groups[s.group].screens.push(s)
+  }
+  // A "group" of one screen is just that screen.
+  return out.map((it) => (it.kind === 'group' && it.screens.length === 1 ? { kind: 'screen', screen: it.screens[0] } : it))
+}
+
+// Checkbox that can show "some ticked".
+function TriCheck({ checked, partial, onChange }: { checked: boolean; partial: boolean; onChange: (on: boolean) => void }) {
+  const ref = useRef<HTMLInputElement>(null)
+  useEffect(() => { if (ref.current) ref.current.indeterminate = partial && !checked }, [partial, checked])
+  return <input ref={ref} type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+}
 
 const sameList = (a: string[] = [], b: string[] = []) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort())
 
@@ -93,6 +122,15 @@ export function ProjectPage() {
     ...cur, [screen]: on ? [...(cur[screen] ?? []), field] : (cur[screen] ?? []).filter((x) => x !== field),
   }))
   const viewable = (s: PermScreen) => (grants[s.name] ?? []).includes('view')
+  const setScreens = (list: PermScreen[], on: boolean) => setGrants((cur) => ({
+    ...cur, ...Object.fromEntries(list.map((s) => [s.name, on ? s.actions.map((a) => a.name) : []])),
+  }))
+  // A group's action tick: on for every screen of the group that offers it.
+  const toggleGroup = (list: PermScreen[], action: string, on: boolean) => {
+    for (const s of list) if (s.actions.some((a) => a.name === action)) toggle(s.name, action, on)
+  }
+  const isOpenGroup = (key: string) => open[`g:${key}`] ?? true
+  const flipGroup = (key: string) => setOpen((cur) => ({ ...cur, [`g:${key}`]: !(cur[`g:${key}`] ?? true) }))
 
   async function save() {
     if (!data) return
@@ -159,25 +197,61 @@ export function ProjectPage() {
                 <table className="perm-grid">
                   <thead><tr><th>Sub-module</th>{allActions.map((a) => <th key={a}>{actionLabel(a)}</th>)}<th /></tr></thead>
                   <tbody>
-                    {screens.map((s) => {
-                      const offered = new Set(s.actions.map((a) => a.name))
-                      return (
-                        <tr key={s.name}>
-                          <td><strong>{s.label}</strong></td>
-                          {allActions.map((a) => (
-                            <td key={a}>
-                              {offered.has(a)
-                                ? <input type="checkbox" checked={(grants[s.name] ?? []).includes(a)} onChange={(e) => toggle(s.name, a, e.target.checked)} />
-                                : <span className="muted small">—</span>}
+                    {itemsOf(screens).map((it) => {
+                      const row = (s: PermScreen, nested: boolean) => {
+                        const offered = new Set(s.actions.map((a) => a.name))
+                        return (
+                          <tr key={s.name} className={nested ? 'perm-child' : undefined}>
+                            <td>{nested ? <span className="perm-child-label">{s.label}</span> : <strong>{s.label}</strong>}</td>
+                            {allActions.map((a) => (
+                              <td key={a}>
+                                {offered.has(a)
+                                  ? <input type="checkbox" checked={(grants[s.name] ?? []).includes(a)} onChange={(e) => toggle(s.name, a, e.target.checked)} />
+                                  : <span className="muted small">—</span>}
+                              </td>
+                            ))}
+                            <td className="actions">
+                              <div className="btn-group">
+                                <button type="button" className="sm ghost" onClick={() => setScreen(s, true)}>All</button>
+                                <button type="button" className="sm ghost" onClick={() => setScreen(s, false)}>None</button>
+                              </div>
                             </td>
-                          ))}
-                          <td className="actions">
-                            <div className="btn-group">
-                              <button type="button" className="sm ghost" onClick={() => setScreen(s, true)}>All</button>
-                              <button type="button" className="sm ghost" onClick={() => setScreen(s, false)}>None</button>
-                            </div>
-                          </td>
-                        </tr>
+                          </tr>
+                        )
+                      }
+                      if (it.kind === 'screen') return row(it.screen, false)
+                      const gOpen = isOpenGroup(it.key)
+                      return (
+                        <Fragment key={`g:${it.key}`}>
+                          <tr className="perm-group">
+                            <td>
+                              <span className="perm-group-label">
+                                <button type="button" className={`st-caret ${gOpen ? 'open' : ''}`} aria-label={gOpen ? 'Hide screens' : 'Show screens'} onClick={() => flipGroup(it.key)}>
+                                  <Icon name="chevron" size={14} />
+                                </button>
+                                <strong>{it.label}</strong>
+                                <span className="st-tag">{it.screens.length} screens</span>
+                              </span>
+                            </td>
+                            {allActions.map((a) => {
+                              const offering = it.screens.filter((s) => s.actions.some((x) => x.name === a))
+                              if (!offering.length) return <td key={a}><span className="muted small">—</span></td>
+                              const on = offering.filter((s) => (grants[s.name] ?? []).includes(a)).length
+                              return (
+                                <td key={a}>
+                                  <TriCheck checked={on === offering.length} partial={on > 0} onChange={(v) => toggleGroup(it.screens, a, v)} />
+                                </td>
+                              )
+                            })}
+                            <td className="actions">
+                              <div className="btn-group">
+                                <button type="button" className="sm ghost" onClick={() => setScreens(it.screens, true)}>All</button>
+                                <button type="button" className="sm ghost" onClick={() => setScreens(it.screens, false)}>None</button>
+                              </div>
+                            </td>
+                          </tr>
+                          {gOpen && it.screens.map((s) => row(s, true))}
+                        </Fragment>
                       )
                     })}
                     {offIn(m).map((s) => (
@@ -210,30 +284,46 @@ export function ProjectPage() {
               </div>
               <button type="button" className="sm" onClick={() => setOpen({ ...open, [`f:${m.code}`]: !isOpen })}>{isOpen ? 'Hide' : 'Show'}</button>
             </div>
-            {isOpen && screens.map((s) => (
-              <fieldset key={s.name}>
-                <legend>{s.label} · {(fields[s.name] ?? []).length} of {s.fields.length} fields</legend>
-                {!viewable(s) ? (
-                  <span className="muted small">Not allowed in this project. Tick View under Permissions to use this form.</span>
-                ) : (
-                  <>
-                    <div className="btn-group">
-                      <button type="button" className="sm ghost" onClick={() => setAllFields(s, true)}>All fields</button>
-                      <button type="button" className="sm ghost" onClick={() => setAllFields(s, false)}>None</button>
-                    </div>
-                    <div className="field-grid">
-                      {s.fields.map((f) => (
-                        <label key={f.name} className="check">
-                          <input type="checkbox" checked={(fields[s.name] ?? []).includes(f.name)}
-                            onChange={(e) => toggleField(s.name, f.name, e.target.checked)} />
-                          {f.label}
-                        </label>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </fieldset>
-            ))}
+            {isOpen && itemsOf(screens).map((it) => {
+              const box = (s: PermScreen, nested: boolean) => (
+                <fieldset key={s.name} className={nested ? 'perm-child-fields' : undefined}>
+                  <legend>{s.label} · {(fields[s.name] ?? []).length} of {s.fields.length} fields</legend>
+                  {!viewable(s) ? (
+                    <span className="muted small">Not allowed in this project. Tick View under Permissions to use this form.</span>
+                  ) : (
+                    <>
+                      <div className="btn-group">
+                        <button type="button" className="sm ghost" onClick={() => setAllFields(s, true)}>All fields</button>
+                        <button type="button" className="sm ghost" onClick={() => setAllFields(s, false)}>None</button>
+                      </div>
+                      <div className="field-grid">
+                        {s.fields.map((f) => (
+                          <label key={f.name} className="check">
+                            <input type="checkbox" checked={(fields[s.name] ?? []).includes(f.name)}
+                              onChange={(e) => toggleField(s.name, f.name, e.target.checked)} />
+                            {f.label}
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </fieldset>
+              )
+              if (it.kind === 'screen') return box(it.screen, false)
+              const gOpen = isOpenGroup(`f:${it.key}`)
+              return (
+                <div key={`g:${it.key}`} className="perm-field-group">
+                  <div className="perm-group-label">
+                    <button type="button" className={`st-caret ${gOpen ? 'open' : ''}`} aria-label={gOpen ? 'Hide forms' : 'Show forms'} onClick={() => flipGroup(`f:${it.key}`)}>
+                      <Icon name="chevron" size={14} />
+                    </button>
+                    <strong>{it.label}</strong>
+                    <span className="st-tag">{it.screens.length} forms</span>
+                  </div>
+                  {gOpen && it.screens.map((s) => box(s, true))}
+                </div>
+              )
+            })}
           </div>
         )
       })}

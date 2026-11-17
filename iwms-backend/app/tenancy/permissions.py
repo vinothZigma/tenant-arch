@@ -95,6 +95,10 @@ def company_permissions(company, project_id):
             entries.append({
                 "name": screen["name"], "label": screen["label"], "available": db_screen is not None,
                 "in_project": screen["name"] in in_project,
+                # Screens of one sub-module (e.g. Daily Trip Plan = Trip Assignments +
+                # Trip / Household Collection Points) share a group.
+                "group": screen.get("group"),
+                "group_label": catalog.GROUP_LABELS.get(screen.get("group")) if screen.get("group") else None,
                 "actions": [{"name": a, "label": ACTION_LABELS[a], "granted": a in granted.get(screen["name"], ())}
                             for a in _offered(screen)],
                 "fields": fields,
@@ -171,4 +175,8 @@ def save_company_permissions(company, data):
                 elif perm.can_view != on or perm.is_deleted or not perm.is_active:
                     CompanyUserScreenColumnPermission.objects.using(alias).filter(pk=perm.pk).update(
                         can_view=on, is_active=True, is_deleted=False)
+    # Company admins' Staff Access Configuration lists these grants.
+    from .staff_access import refresh_staff_access
+
+    refresh_staff_access(alias)
     return company_permissions(company, project_id)

@@ -84,6 +84,23 @@ def _field_json(field):
     }
 
 
+# Screens whose records live in a table other than SCREEN_TABLES' first one.
+FORM_MODELS = {"attendance": "app.AttendanceNew"}
+
+
+def _form_model(screen_name):
+    """The form's model: by screen name, else the sub-module's main table
+    (screens like complaint "tickets"/"types" or "department-masters" don't
+    match a model name)."""
+    from django.apps import apps
+
+    from .sub_modules import screen_model
+
+    if screen_name in FORM_MODELS:
+        return apps.get_model(FORM_MODELS[screen_name])
+    return _screen_model(screen_name) or screen_model(screen_name)
+
+
 def module_forms(code):
     """[{name, label, model, fields: [...]}] for a built-in module (catalog order)."""
     module = catalog.MODULES.get(code)
@@ -91,7 +108,7 @@ def module_forms(code):
         return []
     forms = []
     for screen in module["screens"]:
-        model = _screen_model(screen["name"])
+        model = _form_model(screen["name"])
         forms.append({
             "name": screen["name"],
             "label": screen["label"],

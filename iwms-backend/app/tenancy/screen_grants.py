@@ -193,3 +193,23 @@ def merge_column_permissions(base, extra):
         if row.get("mainScreenName") and row.get("userScreenName"):
             grouped.setdefault(row["mainScreenName"], {}).setdefault(row["userScreenName"], []).append(row)
     return {"grouped": grouped, "flat": flat}
+
+
+def grantable_screens(project_ids):
+    """{project_id: {screen names}} a Staff Access Configuration may offer:
+    what Console → Companies → Permissions can grant for the project (catalog
+    screens, not Screen Management or platform-only ones, not citizen-app
+    screens) and that the project has on (Edit project → Modules). Key None:
+    the catalog alone (company-level rows). None = not per-company DBs."""
+    alias = get_current_tenant_db()
+    if not per_db_mode() or not alias:
+        return None
+    from .iwms_tables import HIDDEN_MODULES, enabled_screens, project_states
+
+    catalog_screens = {s["name"] for code, module in catalog.MODULES.items() if code not in HIDDEN_MODULES
+                       for s in module["screens"] if not s.get("superadmin_only")}
+    states = project_states(alias)
+    out = {None: catalog_screens}
+    for pid in project_ids:
+        out[pid] = catalog_screens & enabled_screens(states[pid]) if pid in states else set()
+    return out
