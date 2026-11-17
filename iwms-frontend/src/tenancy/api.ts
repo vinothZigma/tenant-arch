@@ -230,3 +230,21 @@ export interface RecordRow {
   is_active?: boolean; is_deleted?: boolean; deleted_at?: string | null
   created_by_id?: Id | null; updated_by_id?: Id | null; deleted_by_id?: Id | null
 }
+
+/** GET /companies/migration-status/ — migrations not yet applied (null: no DB). */
+export interface MigrationStatus {
+  master: string[]
+  companies: Record<string, { pending: string[] | null; error?: string; traceback?: string }>
+}
+
+/** POST /companies/migrate-all/ and /companies/<id>/migrate/ — errors come back here, never as a 500. */
+export interface MigrationRun {
+  master_applied: string[]
+  master_failed?: boolean
+  master_error?: string
+  master_traceback?: string
+  companies: {
+    company: string; name: string; status: 'created' | 'migrated' | 'up_to_date' | 'failed' | 'skipped'
+    applied: string[]; pending?: string[]; error?: string; traceback?: string
+  }[]
+}

@@ -4,6 +4,7 @@ import {
   api, getToken, logout, setToken,
   money, planLimitLines, usageBars, type Company, type Field, type Module, type Plan,
   type PlanModuleLimit, type PlanScreenLimit, type PlanRequestStatus, type Purchase, type PurchaseStatus, type SuperPlanRequest, CURRENCY,
+  type MigrationRun, type MigrationStatus,
 } from '../api'
 import { LoginForm, Modal, UsageBar } from '../components'
 import {
@@ -209,10 +210,71 @@ function Companies() {
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
 
+  const toast = useToast()
+  const [migrations, setMigrations] = useState<MigrationStatus | null>(null)
+  // 'all', a company id, or null when no migration is running.
+  const [migrating, setMigrating] = useState<string | null>(null)
+
+  const loadMigrations = useCallback(() => {
+    api<MigrationStatus>(S, 'GET', '/companies/migration-status/').then(setMigrations).catch(() => setMigrations(null))
+  }, [])
   const load = useCallback(() => {
     api<Company[]>(S, 'GET', '/companies/').then(setCompanies).catch((e) => setError(e.message))
-  }, [])
+    loadMigrations()
+  }, [loadMigrations])
   useEffect(load, [load])
+
+  // Result of the last Migrate / Migrate all, shown until dismissed (errors included).
+  const [lastRun, setLastRun] = useState<{ label: string; at: Date; result: MigrationRun | null; error?: string } | null>(null)
+
+  const migrate = async (target: Company | null) => {
+    setMigrating(target ? String(target.id) : 'all')
+    const label = target ? target.name : 'All databases'
+    try {
+      const res = await api<MigrationRun>(S, 'POST', target ? `/companies/${target.id}/migrate/` : '/companies/migrate-all/')
+      setLastRun({ label, at: new Date(), result: res })
+      const failed = res.companies.filter((c) => c.status === 'failed')
+      const changed = res.companies.filter((c) => c.status === 'migrated' || c.status === 'created')
+      const master = res.master_applied.length ? ` (master DB: ${res.master_applied.length} applied)` : ''
+      if (res.master_failed) {
+        toast('Master database migration failed — see the details below', 'error')
+      } else if (failed.length) {
+        toast(`Migration failed for ${failed.map((c) => c.name).join(', ')} — see the details below`, 'error')
+      } else if (!changed.length && !res.master_applied.length) {
+        toast(`${label}: migrations already up to date`)
+      } else if (target) {
+        const c = res.companies[0]
+        toast(c.status === 'created' ? `${c.name}: database created and migrated${master}`
+          : `${c.name}: migrated successfully, ${c.applied.length} migration${c.applied.length === 1 ? '' : 's'} applied${master}`)
+      } else {
+        toast(`Migrated successfully: ${changed.length} compan${changed.length === 1 ? 'y' : 'ies'} updated${master}`)
+      }
+    } catch (e) {
+      // Request itself failed (server down, timeout, 409 busy, ...).
+      setLastRun({ label, at: new Date(), result: null, error: (e as Error).message })
+      toast((e as Error).message, 'error')
+    } finally {
+      setMigrating(null)
+      loadMigrations()
+    }
+  }
+
+  const migrationBadge = (c: Company) => {
+    if (!migrations) return null
+    const st = migrations.companies[String(c.id)]
+    if (!st) return null
+    if (st.error) return (
+      <span className="badge pending" style={{ cursor: 'pointer' }} title="Click to see the error"
+        onClick={() => setLastRun({ label: `${c.name} (status check)`, at: new Date(), result: {
+          master_applied: [], companies: [{ company: String(c.id), name: c.name, status: 'failed', applied: [], error: st.error, traceback: st.traceback }],
+        } })}>Migration check failed</span>
+    )
+    if (st.pending === null) return <span className="badge pending">No database</span>
+    const n = st.pending.length + migrations.master.length
+    return n
+      ? <span className="badge pending" title={[...migrations.master.map((m) => `master: ${m}`), ...st.pending].join('\n')}>{n} migration{n === 1 ? '' : 's'} pending</span>
+      : <span className="badge on">Migrations up to date</span>
+  }
 
   return (
     <>
@@ -221,10 +283,15 @@ function Companies() {
         subtitle="Each company has its own database, login page and projects. Open one to manage its projects, admins and plan."
         actions={<>
           <span className="search-box"><Icon name="search" size={16} /><input placeholder="Search companies…" value={query} onChange={(e) => setQuery(e.target.value)} /></span>
+          <button onClick={() => void migrate(null)} disabled={migrating !== null}
+            title="Apply new migrations to the master database and every company database">
+            <Icon name="database" size={16} /> {migrating === 'all' ? 'Migrating…' : 'Migrate all'}
+          </button>
           <button className="primary" onClick={() => navigate('/superadmin/companies/new')}><Icon name="plus" size={16} /> New company</button>
         </>}
       />
       {error && <div className="error">{error}</div>}
+      {lastRun && <MigrationResults run={lastRun} onClose={() => setLastRun(null)} />}
       {companies === null ? <Loading /> : companies.length === 0 ? (
         <EmptyState icon="building" title="No companies yet" text="Create one: its database and login page are set up automatically."
           action={<button className="primary" onClick={() => navigate('/superadmin/companies/new')}><Icon name="plus" size={16} /> New company</button>} />
@@ -250,11 +317,15 @@ function Companies() {
                       ))}
                     </> : <span className="error-text">DB unavailable</span>}
                   </td>
-                  <td><span className={`badge ${c.is_active ? 'on' : 'off'}`}>{c.is_active ? 'Active' : 'Disabled'}</span></td>
+                  <td><span className={`badge ${c.is_active ? 'on' : 'off'}`}>{c.is_active ? 'Active' : 'Disabled'}</span><div style={{ marginTop: 6 }}>{migrationBadge(c)}</div></td>
                   <td className="actions">
                     <div className="row-actions">
                       <Link className="button sm primary" to={`/superadmin/companies/${c.id}`}>Manage</Link>
                       <OpenWorkspace company={c} />
+                      <button className="sm" onClick={() => void migrate(c)} disabled={migrating !== null}
+                        title="Apply new migrations to this company's database">
+                        <Icon name="database" size={14} /> {migrating === String(c.id) ? 'Migrating…' : 'Migrate'}
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -264,6 +335,83 @@ function Companies() {
         </div>
       )}
     </>
+  )
+}
+
+const MIGRATION_LABEL: Record<MigrationRun['companies'][number]['status'], [string, string]> = {
+  created: ['on', 'Database created'],
+  migrated: ['on', 'Migrated successfully'],
+  up_to_date: ['off', 'Already up to date'],
+  failed: ['pending', 'Failed'],
+  skipped: ['pending', 'Skipped'],
+}
+
+const preStyle = {
+  whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, maxHeight: 320, overflow: 'auto',
+  background: 'rgba(127,127,127,.08)', padding: 10, borderRadius: 8, margin: '6px 0 0',
+} as const
+
+function MigrationError({ error, traceback }: { error?: string; traceback?: string }) {
+  if (!error) return null
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div className="error-text">{error}</div>
+      {traceback && (
+        <details style={{ marginTop: 4 }}>
+          <summary className="muted small" style={{ cursor: 'pointer' }}>Show full error (traceback)</summary>
+          <pre style={preStyle}>{traceback}</pre>
+          <button className="sm" style={{ marginTop: 6 }} onClick={() => void navigator.clipboard?.writeText(`${error}\n\n${traceback}`)}>Copy error</button>
+        </details>
+      )}
+    </div>
+  )
+}
+
+/** What the last Migrate / Migrate all did, per database, with any error. */
+function MigrationResults({ run, onClose }: {
+  run: { label: string; at: Date; result: MigrationRun | null; error?: string }; onClose: () => void
+}) {
+  const r = run.result
+  const failed = !r || r.master_failed || r.companies.some((c) => c.status === 'failed')
+  return (
+    <div className="card" style={{ padding: 16, marginBottom: 16, borderLeft: `4px solid var(${failed ? '--warn' : '--ok'})` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+        <strong><Icon name="database" size={16} /> Migration result — {run.label}</strong>
+        <span className="muted small">{run.at.toLocaleTimeString()} <button className="sm" onClick={onClose} style={{ marginLeft: 8 }}>Close</button></span>
+      </div>
+      {!r ? <MigrationError error={run.error ?? 'Migration request failed'} /> : (
+        <table style={{ marginTop: 10 }}>
+          <thead><tr><th>Database</th><th>Result</th><th>Details</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Master</td>
+              <td><span className={`badge ${r.master_failed ? 'pending' : r.master_applied.length ? 'on' : 'off'}`}>
+                {r.master_failed ? 'Failed' : r.master_applied.length ? 'Migrated successfully' : 'Already up to date'}</span></td>
+              <td>
+                {r.master_applied.map((m) => <div key={m}><code>{m}</code></div>)}
+                <MigrationError error={r.master_error} traceback={r.master_traceback} />
+              </td>
+            </tr>
+            {r.companies.map((c) => {
+              const [cls, text] = MIGRATION_LABEL[c.status]
+              const notApplied = (c.pending ?? []).filter((m) => !c.applied.includes(m))
+              return (
+                <tr key={c.company}>
+                  <td>{c.name}</td>
+                  <td><span className={`badge ${cls}`}>{text}</span></td>
+                  <td>
+                    {c.applied.map((m) => <div key={m}><code>{m}</code> <span className="muted small">applied</span></div>)}
+                    {c.status === 'failed' && notApplied.map((m) => <div key={m}><code>{m}</code> <span className="error-text small">not applied</span></div>)}
+                    {c.status === 'up_to_date' && <span className="muted small">No new migrations</span>}
+                    <MigrationError error={c.error} traceback={c.traceback} />
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
   )
 }
 

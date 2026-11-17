@@ -252,6 +252,27 @@ class CompanyViewSet(SuperAdminMixin, viewsets.ModelViewSet):
     def _alias(self, company):
         return register_tenant_db(company.db_name)
 
+    @action(detail=False, methods=["get"], url_path="migration-status")
+    def migration_status(self, request):
+        """Pending migrations of the master DB and of every company DB."""
+        from . import schema_migrations
+
+        return Response(schema_migrations.status(self.get_queryset()))
+
+    @action(detail=False, methods=["post"], url_path="migrate-all")
+    def migrate_all(self, request):
+        """Apply pending migrations to the master DB and every company DB."""
+        from . import schema_migrations
+
+        return Response(schema_migrations.run(list(self.get_queryset())))
+
+    @action(detail=True, methods=["post"])
+    def migrate(self, request, pk=None):
+        """Apply pending migrations to this company's DB (master first)."""
+        from . import schema_migrations
+
+        return Response(schema_migrations.run([self.get_object()]))
+
     @action(detail=True, methods=["get", "post"])
     def projects(self, request, pk=None):
         company = self.get_object()

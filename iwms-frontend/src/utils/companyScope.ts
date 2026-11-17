@@ -21,13 +21,17 @@ const write = (s: () => Storage, k: string, v: string | null) => {
   try { if (v === null) s().removeItem(k); else s().setItem(k, v); } catch { /* private mode */ }
 };
 
-/** The company of this tab (super admin view) or of this browser. */
+/**
+ * The company of this tab. Each tab keeps its own (sessionStorage), so signing
+ * in to another company in another tab never switches this tab's API or URL.
+ * localStorage only remembers the last company for brand-new tabs.
+ */
 export const getCompanySlug = (): string | null =>
   read(() => sessionStorage, COMPANY_KEY) ?? read(() => localStorage, COMPANY_KEY);
 
 export const setCompanySlug = (slug: string | null): void => {
   write(() => localStorage, COMPANY_KEY, slug);
-  write(() => sessionStorage, COMPANY_KEY, null);
+  write(() => sessionStorage, COMPANY_KEY, slug);
   write(() => sessionStorage, TAB_TOKEN_KEY, null);
 };
 

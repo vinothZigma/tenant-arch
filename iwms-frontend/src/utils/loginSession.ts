@@ -1,5 +1,6 @@
 import { isAxiosError } from "axios";
 import { apiForPortal, type Portal } from "@/api";
+import { getCompanySlug } from "@/utils/companyScope";
 import { sessionStore } from "@/utils/sessionStore";
 
 /* --------------------------------------------------------
@@ -39,8 +40,13 @@ const LOGOUT_REQUEST_TIMEOUT_MS = 5000;
 const sessionKey = (portal: Portal) => `${portal}__session`;
 // Activity timestamps are not user data, so they stay in localStorage where
 // every tab shares them: activity in any tab keeps the session alive.
-const lastActivityKey = (portal: Portal) => `${portal}__last_activity`;
-const lastHeartbeatKey = (portal: Portal) => `${portal}__last_heartbeat`;
+// Keyed per company too: tabs of different companies have separate sessions.
+const companyPart = () => {
+  const slug = getCompanySlug();
+  return slug ? `${slug}__` : "";
+};
+const lastActivityKey = (portal: Portal) => `${companyPart()}${portal}__last_activity`;
+const lastHeartbeatKey = (portal: Portal) => `${companyPart()}${portal}__last_heartbeat`;
 
 const readNumber = (key: string): number | null => {
   try {
@@ -63,9 +69,11 @@ const writeNumber = (key: string, value: number) => {
 const channel =
   typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("iwms-auth") : null;
 
-channel?.addEventListener("message", (event: MessageEvent<{ portal?: Portal }>) => {
+channel?.addEventListener("message", (event: MessageEvent<{ portal?: Portal; company?: string | null }>) => {
   const portal = event.data?.portal;
   if (!portal) return;
+  // A logout of another company (signed in in another tab) is not ours.
+  if ((event.data.company ?? null) !== getCompanySlug()) return;
   sessionStore.removeItem(sessionKey(portal));
   window.dispatchEvent(new CustomEvent(SESSION_ENDED_EVENT, { detail: { portal } }));
 });
@@ -124,7 +132,7 @@ export const clearLoginSessionTracking = (portal: Portal) => {
   } catch {
     /* ignore */
   }
-  if (hadSession) channel?.postMessage({ portal });
+  if (hadSession) channel?.postMessage({ portal, company: getCompanySlug() });
 };
 
 /**
