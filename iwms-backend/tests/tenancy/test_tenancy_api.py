@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 
 from app.models.superadmin.staff_management.staffcreation import Staffcreation
 from app.models.superadmin_masters.company import Company
-from app.models.tenancy.master import Module, Plan, PlanModuleLimit
+from app.models.tenancy.master import Module, Plan, PlanModuleLimit, PlanScreenLimit
 from app.tenancy import enforcement
 from app.tenancy.context import tenant_context
 from app.tenancy.db import register_tenant_db, tenant_table_names
@@ -226,6 +226,20 @@ class TestLimits:
     def _limit(self, code, n, plan="basic"):
         PlanModuleLimit.objects.filter(plan__code=plan, module__code=code).update(record_limit=n)
 
+    def _screen_limit(self, code, screen, n, plan="basic"):
+        """Built-in modules are limited per sub-module (form), not per module."""
+        PlanScreenLimit.objects.update_or_create(
+            plan=Plan.objects.get(code=plan), screen=screen,
+            defaults={"module": Module.objects.get(code=code), "record_limit": n})
+
+    def _grant(self, sup, c, module, actions):
+        """Company admins only get the IWMS screens granted in the console."""
+        seed_screens(c, *actions, module=module)
+        url = f"/api/super/companies/{c.pk}/permissions/"
+        project = sup.get(url).data["project"]
+        r = sup.put(url, {"project": project, "actions": actions}, format="json")
+        assert r.status_code == 200, r.content
+
     def test_record_limit_messages_and_extra_records(self, sup):
         self._limit("assets", 1)
         c = make_company(sup, "Hotel")
@@ -256,7 +270,7 @@ class TestLimits:
                                                 "permissions": {pid: {"assets": {"create": True}}}}, format="json")
         staff = admin_client(c, "ravi")
         me = staff.get(f"/api/t/{c.slug}/ws/me/").data
-        assert me["usage"] is None and me["limits_reached"] == ["assets"]
+        assert me["usage"] is None and me["limits_reached"] == ["Assets"]
         r = staff.post(f"/api/t/{c.slug}/ws/projects/{pid}/modules/assets/records/", {"data": {"name": "A"}},
                        format="json")
         assert r.data["detail"] == "Assets is full for now. Ask your company admin to add more."
@@ -294,24 +308,27 @@ class TestLimits:
         assert r.status_code == 403 and "User limit reached" in r.data["detail"]
 
     def test_builtin_module_limit_on_iwms_route(self, sup):
-        self._limit("transport-masters", 0)
+        self._screen_limit("transport-masters", "vehicle-creation", 0)
         c = make_company(sup, "Lima")
+        self._grant(sup, c, "transport-masters", {"vehicle-creation": ["view", "add"]})
         token = company_login(c.slug, "boss").data["token"]
         r = bearer(token).post(f"/api/t/{c.slug}/transport-masters/vehicle-creation/",
-                               {"vehicle_no": "TN01AB1234"}, format="json")
-        assert r.status_code == 403
-        assert r.json()["detail"].startswith("Transport Masters limit reached: 0 on the Basic plan")
+                               {"vehicle_no": "TN01AB1234", "company_id_input": c.unique_id}, format="json")
+        assert r.status_code == 403, r.content
+        assert r.json()["detail"].startswith(
+            "Transport Masters › Vehicle Creation limit reached: 0 on the Basic plan")
 
     def test_limit_applies_to_the_main_route_only(self, sup):
-        self._limit("staff-creations", 0)
+        self._screen_limit("staff-creations", "staffcreation", 0)
         c = make_company(sup, "Lima Two")
+        self._grant(sup, c, "staff-creations", {"staffcreation": ["view", "add"], "department-masters": ["view", "add"]})
         token = company_login(c.slug, "boss").data["token"]
         # Staff limit full: a department (same module, not its main route) is not a staff record.
         r = bearer(token).post(f"/api/t/{c.slug}/staff-creations/departments/", {"name": "Ops"}, format="json")
         assert r.status_code != 403 or "limit reached" not in r.json().get("detail", "")
         r = bearer(token).post(f"/api/t/{c.slug}/staff-creations/staffcreation/", {"employee_name": "X"},
                                format="json")
-        assert r.status_code == 403 and "Staff Management limit reached" in r.json()["detail"]
+        assert r.status_code == 403 and "Staff Management › Staff Creation limit reached" in r.json()["detail"]
 
     def test_plan_change_request_flow(self, sup):
         c = make_company(sup, "Mike")

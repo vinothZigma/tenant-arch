@@ -8,10 +8,11 @@ from app.serializers.superadmin_masters.company_create_serializer import (
     CompanySerializer,
     PlatformCompanyCreateSerializer,
 )
+from app.utils.actor_stamp import ActorStampMixin
 from app.utils.audit_mixin import AuditViewSetMixin
 from app.utils.bulk_upload_mixin import BulkUploadMixin
 
-class PlatformCompanyCreateViewSet(BulkUploadMixin, AuditViewSetMixin, viewsets.ModelViewSet):
+class PlatformCompanyCreateViewSet(BulkUploadMixin, AuditViewSetMixin, ActorStampMixin, viewsets.ModelViewSet):
     permission_classes = [PlatformOrCompanyAdminOnly]
     permission_resource = "Company"
     serializer_class = CompanySerializer

@@ -251,14 +251,20 @@ class TestLoginStaffBranch:
         assert "staffusertype_unique_id" in profile
 
     def test_staff_login_role_from_role_type(self, api_client, db):
-        """Lines 85-86: role resolved from staffusertype_id.name."""
+        """Lines 85-86: role resolved from the staffusertype property."""
         user = self._user(db, "03")
         mock_role = MagicMock()
         mock_role.name = "field_operator"
         mock_profile = MagicMock()
         mock_profile.employee_name = "Field Worker"
-        mock_profile.staffusertype_id = mock_role
+        mock_profile.staffusertype_id = "STU-FIELD-01"
         mock_profile.contractorusertype_id = None
+        # Login reads the lookup properties (ids are plain unique_id strings).
+        mock_profile.staffusertype = mock_role
+        mock_profile.contractorusertype = None
+        mock_profile.company = None
+        mock_profile.district = None
+        mock_profile.project = None
         mock_profile.company_id = None
         mock_profile.staff_unique_id = "STAFF-FW-01"
         mock_profile.emp_id = None
@@ -279,6 +285,12 @@ class TestLoginStaffBranch:
         mock_profile.employee_name = "Worker"
         mock_profile.staffusertype_id = None
         mock_profile.contractorusertype_id = None
+        # Login reads the lookup properties (ids are plain unique_id strings).
+        mock_profile.staffusertype = None
+        mock_profile.contractorusertype = None
+        mock_profile.company = None
+        mock_profile.district = None
+        mock_profile.project = None
         mock_profile.company_id = None
         mock_profile.staff_unique_id = None
         mock_profile.emp_id = None
@@ -424,6 +436,12 @@ class TestLoginStaffEmpIdBranch:
         mock_profile.employee_name = "Worker"
         mock_profile.staffusertype_id = None
         mock_profile.contractorusertype_id = None
+        # Login reads the lookup properties (ids are plain unique_id strings).
+        mock_profile.staffusertype = None
+        mock_profile.contractorusertype = None
+        mock_profile.company = None
+        mock_profile.district = None
+        mock_profile.project = None
         mock_profile.company_id = None
         mock_profile.staff_unique_id = "STAFF-EMP-01"
         mock_profile.emp_id = "EMP-001"       # truthy → skips derivation
@@ -462,7 +480,7 @@ class TestLoginUnknownUserType:
 @pytest.mark.django_db
 class TestLoginCompanyResolution:
     def test_company_from_profile_object(self, api_client, db):
-        """Lines 110-117: company resolved from profile_object.company_id."""
+        """Lines 110-117: company resolved from the profile_object.company property."""
         from app.models.superadmin_masters.auth_user import User
         user = User.objects.create_superuser(
             username="comp_u", password="P@ss123", unique_id="U-COMP-01"
@@ -470,12 +488,19 @@ class TestLoginCompanyResolution:
         mock_company = MagicMock()
         mock_company.name = "Test Company"
         mock_company.unique_id = "COMP-001"
+        mock_company.company_logo = None
 
         mock_profile = MagicMock()
-        mock_profile.company_id = mock_company
+        mock_profile.company_id = mock_company.unique_id
         mock_profile.employee_name = "Emp"
         mock_profile.staffusertype_id = None
         mock_profile.contractorusertype_id = None
+        # Login reads the lookup properties (ids are plain unique_id strings).
+        mock_profile.staffusertype = None
+        mock_profile.contractorusertype = None
+        mock_profile.company = mock_company
+        mock_profile.district = None
+        mock_profile.project = None
         mock_profile.staff_unique_id = None
         mock_profile.emp_id = None
         mock_profile.personal_details = None

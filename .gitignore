@@ -20,3 +20,6 @@ dist/
 .backups/
 iwms-backend/tenant_dbs/
 iwms-backend/master.sqlite3
+
+# Console → Testing run results, screenshots and test pycache
+.iwms-testing/

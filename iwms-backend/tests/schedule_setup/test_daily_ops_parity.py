@@ -263,7 +263,7 @@ class TestMarkCompletedStatusRule:
         self, assignment, collection_point, bin_obj, driver
     ):
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
         )
         stop.mark_collected(Decimal("10.00"), None)
         assignment.refresh_from_db()
@@ -273,7 +273,7 @@ class TestMarkCompletedStatusRule:
         self, assignment, collection_point, bin_obj
     ):
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
         )
         stop.mark_status(DailyTripCollectionPoint.STATUS_MISSED, "Bin inaccessible")
         assignment.refresh_from_db()
@@ -281,7 +281,7 @@ class TestMarkCompletedStatusRule:
 
     def test_skipped_stop_does_not_complete_trip(self, assignment, collection_point, bin_obj):
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
         )
         stop.mark_status(DailyTripCollectionPoint.STATUS_SKIPPED, "Collect later")
         assignment.refresh_from_db()
@@ -295,7 +295,7 @@ class TestMarkCompletedStatusRule:
         TripCompletionNudge (which reads this via `progress.resolved`, not
         this method directly) has an accurate signal to act on."""
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
         )
         stop.mark_collected(Decimal("10.00"), None)
         assignment.refresh_from_db()
@@ -307,7 +307,7 @@ class TestMarkCompletedStatusRule:
         the default auto_end=True and must keep closing the trip immediately
         — there is no "driver confirms" step for a direct admin edit."""
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
             collected_weight_kg=Decimal("10.00"), is_collected=True,
             status=DailyTripCollectionPoint.STATUS_COLLECTED,
         )
@@ -324,7 +324,7 @@ class TestMarkCompletedStatusRule:
 class TestDailyTripCollectionPointMarkStatus:
     def test_mark_status_clears_weight_and_collected_flag(self, assignment, collection_point, bin_obj):
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
             collected_weight_kg=Decimal("5.00"), is_collected=True,
             status=DailyTripCollectionPoint.STATUS_COLLECTED,
         )
@@ -348,7 +348,7 @@ class TestDailyTripHouseholdCollectionStatus:
 
     def test_mark_status_not_available(self, assignment, household_customer):
         row = DailyTripHouseholdCollection.objects.create(
-            trip_assignment_id=assignment.id, customer_id=household_customer.unique_id,
+            trip_assignment_id=assignment.unique_id, customer_id=household_customer.unique_id,
         )
         row.mark_status(DailyTripHouseholdCollection.STATUS_MISSED, "Not home", latitude="13.01", longitude="80.02")
         row.refresh_from_db()
@@ -358,7 +358,7 @@ class TestDailyTripHouseholdCollectionStatus:
 
     def test_geo_denormalised_from_customer(self, assignment, household_customer, ward, zone, panchayat):
         row = DailyTripHouseholdCollection.objects.create(
-            trip_assignment_id=assignment.id, customer_id=household_customer.unique_id,
+            trip_assignment_id=assignment.unique_id, customer_id=household_customer.unique_id,
         )
         assert row.ward_id == ward.pk
         assert row.zone_id == zone.pk
@@ -375,11 +375,11 @@ class TestBinCollectionEventGeoAndStatus:
         self, assignment, collection_point, bin_obj, waste_type_obj, ward, zone, panchayat,
     ):
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
         )
         event = BinCollectionEvent.objects.create(
             company_id=assignment.company_id, project_id=assignment.project_id,
-            trip_assignment_id=assignment.id, trip_collection_point_id=stop.unique_id,
+            trip_assignment_id=assignment.unique_id, trip_collection_point_id=stop.unique_id,
             collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
             waste_type_id=waste_type_obj.unique_id, collected_weight_kg=Decimal("12.50"),
         )
@@ -389,11 +389,11 @@ class TestBinCollectionEventGeoAndStatus:
 
     def test_default_status_is_collected(self, assignment, collection_point, bin_obj, waste_type_obj):
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
         )
         event = BinCollectionEvent.objects.create(
             company_id=assignment.company_id, project_id=assignment.project_id,
-            trip_assignment_id=assignment.id, trip_collection_point_id=stop.unique_id,
+            trip_assignment_id=assignment.unique_id, trip_collection_point_id=stop.unique_id,
             collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
             waste_type_id=waste_type_obj.unique_id, collected_weight_kg=Decimal("12.50"),
         )
@@ -401,11 +401,11 @@ class TestBinCollectionEventGeoAndStatus:
 
     def test_not_collected_status_allows_null_weight(self, assignment, collection_point, bin_obj, waste_type_obj):
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
         )
         event = BinCollectionEvent.objects.create(
             company_id=assignment.company_id, project_id=assignment.project_id,
-            trip_assignment_id=assignment.id, trip_collection_point_id=stop.unique_id,
+            trip_assignment_id=assignment.unique_id, trip_collection_point_id=stop.unique_id,
             collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
             waste_type_id=waste_type_obj.unique_id,
             status=BinCollectionEvent.STATUS_NOT_COLLECTED,
@@ -422,11 +422,11 @@ class TestBinCollectionEventGeoAndStatus:
             state_id=state.unique_id, district_id=district.unique_id, city_id=city.unique_id,
         )
         stop = DailyTripCollectionPoint.objects.create(
-            trip_assignment_id=assignment.id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
+            trip_assignment_id=assignment.unique_id, collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
         )
         event = BinCollectionEvent.objects.create(
             company_id=assignment.company_id, project_id=assignment.project_id,
-            trip_assignment_id=assignment.id, trip_collection_point_id=stop.unique_id,
+            trip_assignment_id=assignment.unique_id, trip_collection_point_id=stop.unique_id,
             collection_point_id=collection_point.unique_id, bin_id=bin_obj.unique_id,
             waste_type_id=waste_type_obj.unique_id, collected_weight_kg=Decimal("1.00"),
             panchayat_id=other_panchayat.unique_id,

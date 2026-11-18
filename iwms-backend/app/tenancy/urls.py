@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 
 from . import api_company as company
 from . import api_super as sup
+from app.testing import api as testing
 
 router = DefaultRouter(trailing_slash=True)
 router.include_root_view = False
@@ -22,6 +23,15 @@ super_patterns = [
     path("me/password/", sup.PasswordView.as_view()),
     path("dashboard/", sup.DashboardView.as_view()),
     path("excel-screens/", sup.ExcelScreensView.as_view()),
+    # Console → Testing (app/testing/)
+    path("testing/", testing.TestingHomeView.as_view()),
+    path("testing/cases/", testing.TestingCasesView.as_view()),
+    path("testing/runs/", testing.TestingRunsView.as_view()),
+    path("testing/runs/<str:run_id>/", testing.TestingRunView.as_view()),
+    path("testing/runs/<str:run_id>/stop/", testing.TestingStopView.as_view()),
+    path("testing/runs/<str:run_id>/test/", testing.TestingTestView.as_view()),
+    path("testing/runs/<str:run_id>/log/", testing.TestingLogView.as_view()),
+    path("testing/runs/<str:run_id>/screens/<str:name>/", testing.TestingScreenView.as_view()),
     # No "data/" browser: the platform super admin doesn't read company
     # records; the company's developer login sees everything instead.
     path("", include(router.urls)),

@@ -22,7 +22,7 @@ DEFAULT_STAFF_PASSWORD = "Staff123"
 def backfill_missing_staff_ids():
     missing_staff = Staffcreation.objects.filter(
         Q(staff_id__isnull=True) | Q(staff_id="")
-    ).order_by("company_id_id", "project_id_id", "staff_unique_id")
+    ).order_by("company_id", "project_id", "staff_unique_id")
     repaired_count = 0
     for staff in missing_staff.iterator():
         staff.save(update_fields=["staff_id"])

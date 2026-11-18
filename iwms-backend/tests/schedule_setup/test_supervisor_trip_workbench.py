@@ -108,7 +108,7 @@ def test_mixed_collected_and_missed_stops_are_an_exception(assignment_factory, s
     second_bin.unique_id = 'TEST-BIN-SECOND'
     second_bin.save()
     for sequence, state in enumerate(['Collected', 'Missed'], start=1):
-        DailyTripCollectionPoint.objects.create(trip_assignment_id=trip.id,
+        DailyTripCollectionPoint.objects.create(trip_assignment_id=trip.unique_id,
             collection_point_id=collection_point.unique_id, bin_id=(bin_obj if sequence == 1 else second_bin).unique_id, sequence=sequence,
             status=state, company_id=trip.company_id, project_id=trip.project_id,
             is_collected=state == 'Collected')

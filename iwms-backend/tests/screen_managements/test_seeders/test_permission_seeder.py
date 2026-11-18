@@ -9,8 +9,9 @@ from app.models.superadmin.screen_management.userscreen import UserScreen
 
 
 EXPECTED_GROUPS = {
-    "dashboard": ["dashboard"],
+    "dashboard": ["dashboard", "user-dashboard"],
     "super-admin": [
+        "superadmin-masters",
         "screen-managements",
         "role-assigns",
         "staff-creations",
@@ -34,10 +35,12 @@ EXPECTED_GROUPS = {
         "complaint-ticket",
         "attendance",
     ],
+    # "schedule-masters" was retired (its screens moved to "reports").
     "reports": [
-        "schedule-masters",
         "reports",
+        "fleet-reports",
     ],
+    "mobile-app": ["app-citizen"],
 }
 
 EXPECTED_SIDEBAR_SCREENS = {
@@ -74,7 +77,7 @@ EXPECTED_SIDEBAR_SCREENS = {
     # module; what stays here is the company-scoped entry surface plus the
     # teams that work it.
     "complaint-masters": {"types", "categories", "subcategories", "sla-rules"},
-    "complaint-ticket": {"tickets", "teams", "feedback"},
+    "complaint-ticket": {"tickets", "feedback"},
     "audits": {"common-audit", "login-audit"},
     "transport-masters": {"vehicle-type", "vehicle-creation", "fuels"},
     "masters": {"panchayat-leaders", "district-leaders", "plants"},
@@ -86,7 +89,7 @@ EXPECTED_SIDEBAR_SCREENS = {
 def test_permission_seeder_groups_modules_like_the_admin_sidebar(company, project):
     legacy_type = MainScreenType.objects.create(type_name="megamenu")
     MainScreen.objects.create(
-        mainscreentype_id=legacy_type,
+        mainscreentype_id=legacy_type.unique_id,
         mainscreen_name="schedule-setup",
         icon_name="schedule-setup",
         order_no=1,
@@ -99,16 +102,17 @@ def test_permission_seeder_groups_modules_like_the_admin_sidebar(company, projec
     for group_name, expected_modules in EXPECTED_GROUPS.items():
         screen_type = MainScreenType.objects.get(type_name=group_name)
         actual_modules = list(
-            MainScreen.objects.filter(mainscreentype_id=screen_type)
+            MainScreen.objects.filter(mainscreentype_id=screen_type.unique_id)
             .order_by("order_no")
             .values_list("mainscreen_name", flat=True)
         )
         assert actual_modules == expected_modules
 
     for module_name, expected_screens in EXPECTED_SIDEBAR_SCREENS.items():
+        main_screen = MainScreen.objects.get(mainscreen_name=module_name)
         actual_screens = set(
             UserScreen.objects.filter(
-                mainscreen_id__mainscreen_name=module_name,
+                mainscreen_id=main_screen.unique_id,
                 is_active=True,
                 is_deleted=False,
             ).values_list("userscreen_name", flat=True)

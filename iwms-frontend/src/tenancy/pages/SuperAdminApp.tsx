@@ -15,6 +15,7 @@ import { ModuleDetail } from './moduleDetail'
 import { ProjectPage } from './permissionsTab'
 import { PrintTemplates } from './printTemplates'
 import { ExcelColumns } from './excelColumns'
+import { Testing } from './testing'
 import { CompanyDetail, CompanyWizard, OpenWorkspace, FieldsEditor, slugPreview } from './companySetup'
 
 const S = 'super' as const
@@ -75,6 +76,9 @@ function Shell() {
           { to: '/superadmin/print-templates', label: 'Print templates', icon: 'printer' },
           { to: '/superadmin/excel-columns', label: 'Excel columns', icon: 'sheet' },
         ] },
+        { title: 'Quality', items: [
+          { to: '/superadmin/testing', label: 'Testing', icon: 'flask' },
+        ] },
         { title: 'Billing', items: [
           { to: '/superadmin/plan-requests', label: 'Plan requests', icon: 'arrowUp', badge: pendingPlans },
           { to: '/superadmin/extra-records', label: 'Extra records', icon: 'receipt', badge: pending },
@@ -95,6 +99,7 @@ function Shell() {
         <Route path="companies/:id/projects/:projectId" element={<ProjectPage />} />
         <Route path="print-templates" element={<PrintTemplates />} />
         <Route path="excel-columns" element={<ExcelColumns />} />
+        <Route path="testing" element={<Testing />} />
         <Route path="extra-records" element={<ExtraRecords />} />
         <Route path="plan-requests" element={<PlanRequests />} />
         <Route path="profile" element={

@@ -214,7 +214,7 @@ class TestCatchAllStopExpandsToCustomers:
         run_for_date(target_date=target_date)
 
         assignment = DailyTripAssignment.objects.get(trip_plan_id=plan.unique_id, trip_date=target_date)
-        rows = DailyTripHouseholdCollection.objects.filter(trip_assignment_id=assignment.id)
+        rows = DailyTripHouseholdCollection.objects.filter(trip_assignment_id=assignment.unique_id)
         # Only the non-bulk customer in scope should be picked up for a
         # household-mode plan; the bulk generator is excluded.
         assert rows.count() == 1
@@ -239,7 +239,7 @@ class TestCatchAllStopExpandsToCustomers:
         run_for_date(target_date=target_date)
 
         assignment = DailyTripAssignment.objects.get(trip_plan_id=plan.unique_id, trip_date=target_date)
-        rows = DailyTripHouseholdCollection.objects.filter(trip_assignment_id=assignment.id)
+        rows = DailyTripHouseholdCollection.objects.filter(trip_assignment_id=assignment.unique_id)
         assert rows.count() == 1
         assert rows.first().customer_id == ward_bulk_customer.unique_id
         assert rows.first().collection_type == DailyTripHouseholdCollection.COLLECTION_TYPE_BULK

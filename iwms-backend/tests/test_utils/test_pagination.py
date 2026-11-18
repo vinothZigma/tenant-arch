@@ -35,8 +35,8 @@ class TestLimitOffsetWithPageUnit:
         assert page == [0, 1]
         assert response.data["page"] == 1
 
-    def test_staff_creation_explicitly_remains_unpaginated(self):
-        assert StaffcreationViewset.pagination_class is None
+    def test_staff_creation_uses_shared_pagination(self):
+        assert StaffcreationViewset.pagination_class is LimitOffsetWithPage
 
 
 BASE = "/api/v1/common-masters/continents/"
@@ -83,9 +83,10 @@ class TestSharedPaginationEnvelope:
 
 
 @pytest.mark.django_db
-class TestStaffCreationRemainsUnpaginated:
-    def test_staff_list_response_is_not_paginated(self, auth_client):
+class TestStaffCreationPaginated:
+    def test_staff_list_response_is_paginated(self, auth_client):
         resp = auth_client.get("/api/v1/staff-creations/staffcreation/")
         assert resp.status_code == 200
         data = resp.json()
-        assert isinstance(data, list)
+        assert {"count", "next", "previous", "page", "total_pages", "results"} <= set(data.keys())
+        assert isinstance(data["results"], list)

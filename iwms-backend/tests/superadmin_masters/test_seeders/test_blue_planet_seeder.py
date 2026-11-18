@@ -13,7 +13,6 @@ from app.models.masters.ward import Ward
 from app.models.masters.zone import Zone
 from app.models.core_modules.schedule_setup.collection_point import Collection_point
 from app.models.core_modules.schedule_setup.trip_plan import TripPlan
-from app.models.core_modules.schedule_setup.trip_plan_collection_point import TripPlanCollectionPoint
 from app.models.superadmin_masters.company import Company
 from app.models.superadmin_masters.project import Project
 from app.models.masters.transport_masters.vehicleCreation import VehicleCreation
@@ -53,43 +52,32 @@ class TestBluePlanetSeeder:
         ) == {v["vehicle_no"] for v in BluePlanetSeeder.GNO_REAL_VEHICLES}
 
         for project in projects:
-            assert Zone.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == 3
-            assert Ward.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == 3
+            # The main project also gets the real ZNE3-GAMMA-01 zone + ward B
+            # used by the Noida customer import.
+            expected_geo = 3 + (1 if project.name == "Blue Planet Integrated Waste Management" else 0)
+            assert Zone.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == expected_geo
+            assert Ward.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == expected_geo
             assert Collection_point.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == 3
             assert Bins.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == 9
             if project.name != "Blue Planet Integrated Waste Management":
                 assert VehicleCreation.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == 2
-            # Blue Planet Integrated Waste Management additionally carries 5 real-address customers
-            # for the dedicated UP16KT1737 route (GNO_REAL_ROUTE_STOPS).
-            expected_customers = 8 + (
-                len(BluePlanetSeeder.GNO_REAL_ROUTE_STOPS) if project.name == "Blue Planet Integrated Waste Management" else 0
-            )
-            assert CustomerCreation.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == expected_customers
-            assert Complaint.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == 3
+            # Greater Noida (GNO, the main project) seeds no customers,
+            # complaints or trip plans: those are created through the app.
+            # The other project keeps the full demo set.
+            is_gno = project.name == "Blue Planet Integrated Waste Management"
+            scope = {"company_id": company.unique_id, "project_id": project.unique_id}
+            assert CustomerCreation.objects.filter(**scope).count() == (0 if is_gno else 8)
+            assert Complaint.objects.filter(**scope).count() == (0 if is_gno else 3)
 
-            bin_trip_plan = TripPlan.objects.get(
-                company_id=company.unique_id, project_id=project.unique_id, collection_type=TripPlan.COLLECTION_TYPE_BIN
-            )
-            assert bin_trip_plan.is_auto_assign is True
-
-            household_trip_plans = TripPlan.objects.filter(
-                company_id=company.unique_id, project_id=project.unique_id, collection_type=TripPlan.COLLECTION_TYPE_HOUSEHOLD
-            )
-            assert household_trip_plans.count() == (2 if project.name == "Blue Planet Integrated Waste Management" else 1)
-            assert all(plan.is_auto_assign for plan in household_trip_plans)
-
-            if project.name == "Blue Planet Integrated Waste Management":
-                real_route_vehicle = VehicleCreation.objects.get(
-                    vehicle_no=BluePlanetSeeder.GNO_REAL_ROUTE_VEHICLE_NO
-                )
-                real_route_plan = household_trip_plans.get(
-                    vehicle_id=real_route_vehicle.unique_id
-                )
-                assert TripPlanCollectionPoint.objects.filter(
-                    trip_plan_id=real_route_plan.unique_id, is_active=True
-                ).count() == len(
-                    BluePlanetSeeder.GNO_REAL_ROUTE_STOPS
-                )
+            bin_trip_plans = TripPlan.objects.filter(**scope, collection_type=TripPlan.COLLECTION_TYPE_BIN)
+            household_trip_plans = TripPlan.objects.filter(**scope, collection_type=TripPlan.COLLECTION_TYPE_HOUSEHOLD)
+            if is_gno:
+                assert not bin_trip_plans.exists()
+                assert not household_trip_plans.exists()
+            else:
+                assert bin_trip_plans.get().is_auto_assign is True
+                assert household_trip_plans.count() == 1
+                assert all(plan.is_auto_assign for plan in household_trip_plans)
 
             for bin_obj in Bins.objects.filter(company_id=company.unique_id, project_id=project.unique_id):
                 assert bin_obj.ward_id is not None
@@ -102,12 +90,11 @@ class TestBluePlanetSeeder:
         company = Company.objects.get(name="Blue Planet")
         assert Project.objects.filter(company_id=company.unique_id).count() == 2
         for project in Project.objects.filter(company_id=company.unique_id):
-            assert Zone.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == 3
-            expected_customers = 8 + (
-                len(BluePlanetSeeder.GNO_REAL_ROUTE_STOPS) if project.name == "Blue Planet Integrated Waste Management" else 0
-            )
-            assert CustomerCreation.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == expected_customers
-            assert Complaint.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == 3
+            expected_geo = 3 + (1 if project.name == "Blue Planet Integrated Waste Management" else 0)
+            assert Zone.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == expected_geo
+            is_gno = project.name == "Blue Planet Integrated Waste Management"
+            assert CustomerCreation.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == (0 if is_gno else 8)
+            assert Complaint.objects.filter(company_id=company.unique_id, project_id=project.unique_id).count() == (0 if is_gno else 3)
 
     def test_backfills_missing_staff_ids_across_all_projects(self):
         BluePlanetSeeder().run()

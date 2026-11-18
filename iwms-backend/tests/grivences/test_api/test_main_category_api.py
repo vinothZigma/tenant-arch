@@ -2,7 +2,7 @@
 import pytest
 from app.models.core_modules.complaint_management.main_category_citizenGrievance import MainCategory
 
-BASE = "/api/v1/grivences/main-category/"
+BASE = "/api/v1/main-category/"
 
 
 @pytest.mark.django_db

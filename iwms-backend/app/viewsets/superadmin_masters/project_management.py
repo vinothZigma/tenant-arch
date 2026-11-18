@@ -11,6 +11,7 @@ from app.serializers.superadmin_masters.project_create_serializer import (
     ProjectSerializer,
     ProjectUpdateSerializer,
 )
+from app.utils.actor_stamp import ActorStampMixin
 from app.utils.audit_mixin import AuditViewSetMixin
 from app.utils.bulk_upload_mixin import BulkUploadMixin
 
@@ -24,7 +25,7 @@ def visible_project_ids(request):
     return list(view.get_queryset().values_list("unique_id", flat=True))
 
 
-class CompanyProjectCreateViewSet(BulkUploadMixin, AuditViewSetMixin, viewsets.ModelViewSet):
+class CompanyProjectCreateViewSet(BulkUploadMixin, AuditViewSetMixin, ActorStampMixin, viewsets.ModelViewSet):
     permission_classes = [PlatformOrCompanyAdminFullAccess]
     # MultiPart/Form parsers accept the project_logo upload.
     parser_classes = (MultiPartParser, FormParser, JSONParser)

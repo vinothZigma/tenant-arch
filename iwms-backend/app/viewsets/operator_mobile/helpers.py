@@ -272,7 +272,7 @@ def validate_bin_against_assignment(
     # rejected every scan on trips where only the JSON list was filled.
     trip_waste_type_ids = _assignment_waste_type_ids(assignment)
     if trip_waste_type_ids and str(bin_obj.wastetype_id) not in trip_waste_type_ids:
-        bin_waste = getattr(bin_obj.wastetype_id, "waste_type_name", "unknown")
+        bin_waste = getattr(bin_obj.wastetype, "waste_type_name", "unknown")
         trip_waste_names = _assignment_waste_type_names(assignment) or "unknown"
         raise OperatorFlowError(
             "WRONG_WASTE_TYPE",
@@ -671,8 +671,8 @@ def validate_customer_against_assignment(customer, assignment):
         DailyTripHouseholdCollection,
     )
 
-    customer_company_id = getattr(customer, "company_id_id", None)
-    customer_project_id = getattr(customer, "project_id_id", None)
+    customer_company_id = getattr(customer, "company_id", None)
+    customer_project_id = getattr(customer, "project_id", None)
     if (
         customer_project_id
         and assignment.project_id

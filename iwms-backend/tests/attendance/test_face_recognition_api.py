@@ -17,6 +17,7 @@ actually wrong. Self-match + robustness + a real no-face image is enough to
 prove the wiring without needing trustworthy multi-person ground truth here.
 """
 import glob
+import importlib.util
 import io
 
 import jwt
@@ -26,10 +27,19 @@ from PIL import Image
 
 from app.services import face_recognition as fr
 
+# The InsightFace model isn't a project dependency (install it by hand on a
+# machine that runs face attendance), and the reference photos live under the
+# gitignored media/ folder: without them these tests skip instead of failing.
+needs_insightface = pytest.mark.skipif(
+    importlib.util.find_spec("insightface") is None,
+    reason="insightface is not installed",
+)
+
 
 def _reg_photos():
     files = sorted(glob.glob("media/emp_image/*.jpg"))
-    assert files, "No reference photos under media/emp_image/ to test against."
+    if not files:
+        pytest.skip("No reference photos under media/emp_image/ to test against.")
     return files
 
 
@@ -72,6 +82,7 @@ def staff(db, company):
     )
 
 
+@needs_insightface
 @override_settings(FACE_RECOGNITION_PROVIDER="insightface")
 def test_face_config_reports_active_provider(db, auth_client):
     res = auth_client.get("/api/v1/attendance/face-config/")
@@ -101,6 +112,7 @@ def test_face_config_requires_auth_like_register_and_recognize(db, api_client):
     assert res.status_code == 401
 
 
+@needs_insightface
 @override_settings(FACE_RECOGNITION_PROVIDER="insightface")
 def test_register_then_recognize_same_person_marks_attendance(staff, auth_client):
     from app.models.core_modules.attendance.attendance import Employee
@@ -133,6 +145,7 @@ def test_register_then_recognize_same_person_marks_attendance(staff, auth_client
     assert body["score"] > body["threshold"]
 
 
+@needs_insightface
 @override_settings(FACE_RECOGNITION_PROVIDER="insightface")
 def test_second_punch_toggles_to_out(staff, auth_client):
     photos = _reg_photos()
@@ -155,6 +168,7 @@ def test_second_punch_toggles_to_out(staff, auth_client):
     assert punch().json()["punch_type"] == "OUT"
 
 
+@needs_insightface
 @override_settings(FACE_RECOGNITION_PROVIDER="insightface")
 def test_register_rejects_an_image_with_no_face(staff, auth_client):
     from app.models.core_modules.attendance.attendance import Employee
@@ -172,6 +186,7 @@ def test_register_rejects_an_image_with_no_face(staff, auth_client):
     assert not Employee.objects.filter(staff_id=staff.staff_unique_id).exists()
 
 
+@needs_insightface
 @override_settings(FACE_RECOGNITION_PROVIDER="insightface")
 def test_recognize_404s_when_employee_never_registered(staff, auth_client):
     res = auth_client.post(
@@ -185,6 +200,7 @@ def test_recognize_404s_when_employee_never_registered(staff, auth_client):
     assert res.json()["error"] == "Employee not registered"
 
 
+@needs_insightface
 @override_settings(FACE_RECOGNITION_PROVIDER="insightface")
 def test_punch_backfills_embedding_for_employee_enrolled_under_compreface(staff, auth_client):
     """Employees registered while CompreFace was active have a reference

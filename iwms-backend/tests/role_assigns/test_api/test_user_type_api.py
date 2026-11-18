@@ -6,7 +6,7 @@ from django.conf import settings
 BASE = "/api/v1/role-assigns/user-type/"
 
 
-def _staff_auth_client(api_client, company, project, user_type):
+def _staff_auth_client(api_client, company, project, user_type, monkeypatch):
     from app.models.superadmin.staff_management.staffcreation import Staffcreation
 
     staff = Staffcreation.objects.create(
@@ -19,15 +19,17 @@ def _staff_auth_client(api_client, company, project, user_type):
         approval_status=Staffcreation.APPROVAL_APPROVED,
         login_enabled=True,
     )
+    # Staff permissions come from their Staff Access Configuration rows (not
+    # the token): grant "view" on User Type the way the middleware tests do.
+    from app.middleware import module_permission_middleware
+
+    monkeypatch.setattr(
+        module_permission_middleware,
+        "_resolve_permissions_for_request",
+        lambda request: {"role-assigns": {"user-type": ["view"]}},
+    )
     token = jwt.encode(
-        {
-            "unique_id": staff.staff_unique_id,
-            "permissions": {
-                "role-assigns": {
-                    "user-type": ["view"],
-                },
-            },
-        },
+        {"unique_id": staff.staff_unique_id},
         settings.SECRET_KEY,
         algorithm="HS256",
     )
@@ -51,13 +53,15 @@ class TestUserTypeAPIList:
         company,
         project,
         user_type,
+        monkeypatch,
     ):
-        client = _staff_auth_client(api_client, company, project, user_type)
+        client = _staff_auth_client(api_client, company, project, user_type, monkeypatch)
 
         resp = client.get(BASE)
 
         assert resp.status_code == 200
-        assert any(item["unique_id"] == user_type.unique_id for item in resp.data)
+        items = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        assert any(item["unique_id"] == user_type.unique_id for item in items)
 
 
 @pytest.mark.django_db

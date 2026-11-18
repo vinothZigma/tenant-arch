@@ -3,7 +3,7 @@ import pytest
 from app.models.core_modules.complaint_management.main_category_citizenGrievance import MainCategory
 from app.models.core_modules.complaint_management.sub_category_citizenGrievance import SubCategory
 
-BASE = "/api/v1/grivences/sub-category/"
+BASE = "/api/v1/sub-category/"
 
 
 @pytest.fixture
