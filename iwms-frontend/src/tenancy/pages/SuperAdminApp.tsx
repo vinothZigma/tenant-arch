@@ -6,7 +6,7 @@ import {
   type PlanModuleLimit, type PlanScreenLimit, type PlanRequestStatus, type Purchase, type PurchaseStatus, type SuperPlanRequest, CURRENCY,
   type MigrationRun, type MigrationStatus,
 } from '../api'
-import { LoginForm, Modal, UsageBar } from '../components'
+import { LoginForm, Modal, NumberInput, UsageBar } from '../components'
 import {
   AppShell, Avatar, BrandMark, EmptyState, FullPageLoading, Icon, Loading, PageHeader, ProfilePage, StatCard, useToast,
 } from '../ui'
@@ -506,9 +506,9 @@ function PlanCard({ plan, modules, onSaved, onCancel }: {
   const limitCells = (l: { record_limit: number; extra_record_price: number } | undefined,
     set: (patch: { record_limit?: number; extra_record_price?: number }) => void) => (
     <>
-      <td>{l ? <input type="number" min={0} value={l.record_limit} onChange={(e) => set({ record_limit: Number(e.target.value) })} /> : <span className="muted">Unlimited</span>}</td>
+      <td>{l ? <NumberInput min={0} value={l.record_limit} onValue={(n) => set({ record_limit: n })} /> : <span className="muted">Unlimited</span>}</td>
       <td>{l ? (
-        <span className="price-input">{CURRENCY}<input type="number" min={0} step="0.01" value={l.extra_record_price} onChange={(e) => set({ extra_record_price: Number(e.target.value) })} /></span>
+        <span className="price-input">{CURRENCY}<NumberInput min={0} step="0.01" value={l.extra_record_price} onValue={(n) => set({ extra_record_price: n })} /></span>
       ) : <span className="muted">—</span>}</td>
     </>
   )
@@ -519,9 +519,9 @@ function PlanCard({ plan, modules, onSaved, onCancel }: {
         <span className="plan-icon"><Icon name="layers" size={20} /></span>
         <label>Plan name<input value={name} onChange={(e) => { setName(e.target.value); if (!plan) setCode(slugPreview(e.target.value)) }} /></label>
         <label>Code<input value={code} disabled={!!plan} onChange={(e) => setCode(e.target.value)} /></label>
-        <label>User limit<input type="number" min={1} value={userLimit} onChange={(e) => setUserLimit(Number(e.target.value))} /></label>
-        <label>Extra user price<span className="price-input">{CURRENCY}<input type="number" min={0} step="0.01" value={extraUserPrice} title="Price of one extra user slot (0 = companies can't buy extra users)" onChange={(e) => setExtraUserPrice(Number(e.target.value))} /></span></label>
-        <label>Price per month<span className="price-input">{CURRENCY}<input type="number" min={0} step="0.01" value={price} onChange={(e) => setPrice(Number(e.target.value))} /></span></label>
+        <label>User limit<NumberInput min={1} value={userLimit} onValue={setUserLimit} /></label>
+        <label>Extra user price<span className="price-input">{CURRENCY}<NumberInput min={0} step="0.01" value={extraUserPrice} title="Price of one extra user slot (0 = companies can't buy extra users)" onValue={setExtraUserPrice} /></span></label>
+        <label>Price per month<span className="price-input">{CURRENCY}<NumberInput min={0} step="0.01" value={price} onValue={setPrice} /></span></label>
         {plan && <span className="muted">{plan.company_count} {plan.company_count === 1 ? 'company' : 'companies'}</span>}
       </div>
       <label>Short description (shown to companies)<input value={description} placeholder="e.g. For small teams getting started" onChange={(e) => setDescription(e.target.value)} /></label>
@@ -731,7 +731,7 @@ function AddExtraRecords({ onClose, onSaved }: { onClose: () => void; onSaved: (
           </label>
         )}
         <div className="two-col">
-          <label>Quantity<input type="number" min={1} value={form.quantity} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} /></label>
+          <label>Quantity<NumberInput min={1} value={form.quantity} onValue={(n) => setForm({ ...form, quantity: n })} /></label>
           <label>Price per record ({CURRENCY})<input type="number" min={0} step="0.01" placeholder={`Plan price: ${planPrice}`} value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: e.target.value })} /></label>
         </div>
         <label>Note<input value={form.note} placeholder="e.g. paid by bank transfer" onChange={(e) => setForm({ ...form, note: e.target.value })} /></label>

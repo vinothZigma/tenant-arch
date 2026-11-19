@@ -47,7 +47,7 @@ def clean_field_definitions(value):
 class PlanModuleLimitSerializer(serializers.ModelSerializer):
     module = serializers.PrimaryKeyRelatedField(queryset=Module.objects.all())
     module_name = serializers.CharField(source="module.name", read_only=True)
-    extra_record_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    extra_record_price = serializers.DecimalField(max_digits=10, decimal_places=2, coerce_to_string=False, min_value=0)
 
     class Meta:
         model = PlanModuleLimit
@@ -59,7 +59,7 @@ class PlanScreenLimitSerializer(serializers.ModelSerializer):
     module = serializers.PrimaryKeyRelatedField(queryset=Module.objects.filter(kind=Module.BUILTIN))
     module_name = serializers.CharField(source="module.name", read_only=True)
     label = serializers.SerializerMethodField()
-    extra_record_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    extra_record_price = serializers.DecimalField(max_digits=10, decimal_places=2, coerce_to_string=False, min_value=0)
 
     class Meta:
         model = PlanScreenLimit
@@ -78,7 +78,7 @@ class PlanScreenLimitSerializer(serializers.ModelSerializer):
 
 class PlanSerializer(serializers.ModelSerializer):
     company_count = serializers.SerializerMethodField()
-    price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False)
+    price = serializers.DecimalField(max_digits=10, decimal_places=2, coerce_to_string=False, min_value=0, required=False)
     module_limits = PlanModuleLimitSerializer(many=True, required=False)
     screen_limits = PlanScreenLimitSerializer(many=True, required=False)
 
@@ -86,6 +86,7 @@ class PlanSerializer(serializers.ModelSerializer):
         model = Plan
         fields = ["id", "code", "name", "description", "price", "user_limit", "extra_user_price",
                   "company_count", "module_limits", "screen_limits"]
+        extra_kwargs = {"extra_user_price": {"coerce_to_string": False}}
 
     def get_company_count(self, obj):
         return obj.companies.filter(is_deleted=False).count()
@@ -214,7 +215,7 @@ class ExtraRecordPurchaseSerializer(serializers.ModelSerializer):
     module_name = serializers.SerializerMethodField()
     screen = serializers.CharField(required=False, allow_blank=True, default="")
     quantity = serializers.IntegerField(min_value=1, max_value=100000)
-    unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False)
+    unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, coerce_to_string=False, min_value=0, required=False)
     status = serializers.ChoiceField(choices=ExtraRecordPurchase.STATUSES, default=ExtraRecordPurchase.PAID)
 
     class Meta:
@@ -222,6 +223,7 @@ class ExtraRecordPurchaseSerializer(serializers.ModelSerializer):
         fields = ["id", "company", "company_name", "module", "screen", "module_name", "quantity", "unit_price",
                   "total_amount", "status", "requested_by", "note", "created_at", "paid_at"]
         read_only_fields = ["total_amount", "requested_by", "created_at", "paid_at"]
+        extra_kwargs = {"total_amount": {"coerce_to_string": False}}
 
     def get_module_name(self, obj):
         if not obj.module:
@@ -339,7 +341,7 @@ class CompanySerializer(serializers.ModelSerializer):
 class PlanChangeRequestSerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source="company.name", read_only=True)
     from_plan_name = serializers.CharField(source="from_plan.name", read_only=True, default=None)
-    from_plan_price = serializers.DecimalField(source="from_plan.price", max_digits=10, decimal_places=2,
+    from_plan_price = serializers.DecimalField(source="from_plan.price", max_digits=10, decimal_places=2, coerce_to_string=False,
                                                read_only=True, default=None)
     to_plan_name = serializers.CharField(source="to_plan.name", read_only=True)
 
@@ -349,3 +351,4 @@ class PlanChangeRequestSerializer(serializers.ModelSerializer):
                   "to_plan", "to_plan_name", "price", "status", "requested_by", "note", "created_at",
                   "decided_at"]
         read_only_fields = fields
+        extra_kwargs = {"price": {"coerce_to_string": False}}

@@ -1,6 +1,22 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type InputHTMLAttributes, type ReactNode } from 'react'
 import type { Field, Usage } from './api'
 import { BrandMark, Icon } from './ui'
+
+/** Number input that can be cleared while typing (a plain controlled `Number(e.target.value)` input snaps back to 0). */
+export function NumberInput({ value, onValue, ...rest }: Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> & {
+  value: number | string
+  onValue: (n: number) => void
+}) {
+  const [text, setText] = useState(String(Number(value)))
+  useEffect(() => {
+    // Follow outside changes, but leave in-progress text like "" or "1." alone.
+    if (text.trim() === '' ? Number(value) !== 0 : Number(text) !== Number(value)) setText(String(Number(value)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value])
+  return <input {...rest} type="number" value={text}
+    onChange={(e) => { setText(e.target.value); onValue(e.target.value === '' ? 0 : Number(e.target.value)) }}
+    onBlur={(e) => { if (text.trim() === '') setText(String(Number(value))); rest.onBlur?.(e) }} />
+}
 
 export function LoginForm({ title, subtitle, brand, logoUrl, tagline, points, onSubmit }: {
   title: string
